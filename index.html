@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="FSO 6km Optik Veri Aktarım - COMSOL Multiphysics Entegrasyonlu Fizik Motoru Test Sistemi">
+    <title>FSO Fizik Motoru – 6 km Optik Veri Aktarım · COMSOL Entegrasyonu</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- ── Header ─────────────────────────────────────────── -->
+    <header class="header">
+        <div class="header-brand">
+            <div class="header-icon">🔬</div>
+            <div>
+                <div class="header-title">FSO Fizik Motoru v2.0 – COMSOL Entegrasyonu</div>
+                <div class="header-subtitle">6 km Açık Hava Optik Veri Aktarım · Vektörel Snell Yasası · Beer-Lambert · Cn² Türbülans</div>
+            </div>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <div class="header-status" id="backend-status" style="background: rgba(244,63,94,0.08); border-color: rgba(244,63,94,0.2); color: var(--accent-rose);">
+                <span class="dot" style="background: var(--accent-rose); animation: none;"></span>
+                Backend: JS Fallback
+            </div>
+            <div class="header-status" style="background: rgba(139,92,246,0.08); border-color: rgba(139,92,246,0.2); color: var(--accent-violet);">
+                <span>COMSOL</span> Bridge
+            </div>
+            <div class="header-status">
+                <span class="dot"></span>
+                6 km Menzil
+            </div>
+        </div>
+    </header>
+
+    <!-- ── Main Layout ────────────────────────────────────── -->
+    <div class="app-layout">
+
+        <!-- ── Sidebar Controls ───────────────────────────── -->
+        <aside class="sidebar">
+
+            <!-- Grid Settings - 6km -->
+            <div class="control-section animate-in">
+                <div class="section-header">
+                    <div class="section-icon blue">🌐</div>
+                    <span class="section-title">Atmosfer Grid (6 km)</span>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Grid X (Mesafe Hücresi) <span class="control-value" id="grid-x-val">60</span>
+                    </div>
+                    <input type="range" id="grid-x" min="20" max="600" value="60" step="10">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Grid Z (Yükseklik) <span class="control-value" id="grid-z-val">10</span>
+                    </div>
+                    <input type="range" id="grid-z" min="5" max="30" value="10" step="1">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Hücre Boyutu <span class="control-value" id="cell-size-val">100m</span>
+                    </div>
+                    <input type="range" id="cell-size" min="10" max="200" value="100" step="10">
+                </div>
+
+                <div style="padding: 8px 10px; background: rgba(59,130,246,0.06); border-radius: 8px; margin-top: 4px;">
+                    <div style="font-size: 0.68rem; color: var(--text-tertiary); display: flex; justify-content: space-between;">
+                        <span>Toplam Mesafe:</span>
+                        <span class="control-value" id="total-distance-val" style="color: var(--accent-cyan);">6.0 km</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Thermal Settings -->
+            <div class="control-section animate-in-delayed">
+                <div class="section-header">
+                    <div class="section-icon amber">🌡️</div>
+                    <span class="section-title">Termal & Atmosfer Profili</span>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">Profil</div>
+                    <select id="thermal-profile">
+                        <option value="uniform">Uniform (Sabit)</option>
+                        <option value="gradient" selected>Gradient (Dikey Gradyan)</option>
+                        <option value="turbulent">Türbülanslı</option>
+                        <option value="hotspot">Sıcak Nokta (Asfalt/Çöl)</option>
+                        <option value="layered">Katmanlı (Termal İnversiyon)</option>
+                        <option value="coastal">Kıyı (Deniz-Kara Geçişi)</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Baz Sıcaklık <span class="control-value" id="base-temp-val">25°C</span>
+                    </div>
+                    <input type="range" id="base-temp" min="-10" max="50" value="25" step="1">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        ΔT (Sıcaklık Farkı) <span class="control-value" id="delta-t-val">15°C</span>
+                    </div>
+                    <input type="range" id="delta-t" min="0" max="50" value="15" step="1">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">Hava Koşulu</div>
+                    <select id="weather-condition">
+                        <option value="clear" selected>Açık (Visibility >10km)</option>
+                        <option value="haze">Puslu (Visibility ~4km)</option>
+                        <option value="fog">Sisli (Visibility ~0.5km)</option>
+                        <option value="rain">Yağmurlu</option>
+                        <option value="snow">Karlı</option>
+                        <option value="storm">⛈️ Fırtına (Yağmur+Sis+Kar+Rüzgar)</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">Türbülans Seviyesi (Cn²)</div>
+                    <select id="cn2-level">
+                        <option value="weak">Zayıf (10⁻¹⁷ m⁻²/³)</option>
+                        <option value="moderate" selected>Orta (10⁻¹⁵ m⁻²/³)</option>
+                        <option value="strong">Güçlü (10⁻¹³ m⁻²/³)</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Rüzgar Hızı <span class="control-value" id="wind-speed-val">5 m/s</span>
+                    </div>
+                    <input type="range" id="wind-speed" min="0" max="30" value="5" step="1">
+                </div>
+            </div>
+
+            <!-- Laser & Receiver -->
+            <div class="control-section animate-in-delayed">
+                <div class="section-header">
+                    <div class="section-icon emerald">📡</div>
+                    <span class="section-title">Lazer & Alıcı</span>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Dalga Boyu <span class="control-value" id="wavelength-val">1550 nm</span>
+                    </div>
+                    <input type="range" id="wavelength" min="780" max="1600" value="1550" step="10">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Lazer Gücü <span class="control-value" id="laser-power-val">10 mW</span>
+                    </div>
+                    <input type="range" id="laser-power" min="1" max="100" value="10" step="1">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Alıcı Çapı <span class="control-value" id="receiver-diameter-val">0.10 m</span>
+                    </div>
+                    <input type="range" id="receiver-diameter" min="0.02" max="0.50" value="0.10" step="0.01">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Işın Diverjansı <span class="control-value" id="beam-div-val">1.0 mrad</span>
+                    </div>
+                    <input type="range" id="beam-div" min="0.1" max="5.0" value="1.0" step="0.1">
+                </div>
+            </div>
+
+            <!-- Lens System -->
+            <div class="control-section animate-in-delayed" id="lens-section">
+                <div class="section-header">
+                    <div class="section-icon cyan">🔭</div>
+                    <span class="section-title">Lens Sistemi</span>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">Lens Tipi</div>
+                    <select id="lens-type">
+                        <option value="none">Lens Yok (Ham Işın)</option>
+                        <option value="collimating">Kollimating Lens (f=50mm)</option>
+                        <option value="focusing">Odaklayıcı Lens (f=100mm)</option>
+                        <option value="galilean_telescope">Galilean Teleskop (f=200mm)</option>
+                        <option value="cassegrain">Cassegrain Teleskop (f=500mm)</option>
+                        <option value="diverging">Iraksak Lens (Test)</option>
+                    </select>
+                </div>
+
+                <div id="lens-info-box" style="padding: 8px 10px; background: rgba(6,182,212,0.06); border-radius: 8px; margin-top: 4px; display:none;">
+                    <div style="font-size: 0.67rem; color: var(--text-tertiary); line-height: 1.7;">
+                        <div>📐 Diverjans Azalması: <span class="control-value" id="lens-div-reduction">—</span></div>
+                        <div>🔍 Aperture Çarpanı: <span class="control-value" id="lens-aperture-boost">—</span></div>
+                        <div>💡 İletim Verimliliği: <span class="control-value" id="lens-transmittance">—</span></div>
+                        <div style="margin-top:4px; font-style:italic;" id="lens-description">—</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Environment Presets -->
+            <div class="control-section animate-in-delayed">
+                <div class="section-header">
+                    <div class="section-icon emerald">🌍</div>
+                    <span class="section-title">Ortam Presetleri</span>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                    <button class="btn btn-outline env-preset-btn" data-preset="urban" id="preset-urban"
+                            style="font-size: 0.68rem; padding: 6px 4px;">🏙️ Şehir</button>
+                    <button class="btn btn-outline env-preset-btn" data-preset="maritime" id="preset-maritime"
+                            style="font-size: 0.68rem; padding: 6px 4px;">🌊 Deniz</button>
+                    <button class="btn btn-outline env-preset-btn" data-preset="desert" id="preset-desert"
+                            style="font-size: 0.68rem; padding: 6px 4px;">🏜️ Çöl</button>
+                    <button class="btn btn-outline env-preset-btn" data-preset="mountain" id="preset-mountain"
+                            style="font-size: 0.68rem; padding: 6px 4px;">⛰️ Dağ</button>
+                    <button class="btn btn-outline env-preset-btn" data-preset="industrial" id="preset-industrial"
+                            style="font-size: 0.68rem; padding: 6px 4px;">🏭 Endüstri</button>
+                    <button class="btn btn-outline env-preset-btn" data-preset="arctic" id="preset-arctic"
+                            style="font-size: 0.68rem; padding: 6px 4px;">❄️ Arktik</button>
+                    <button class="btn btn-outline env-preset-btn" data-preset="storm" id="preset-storm"
+                            style="font-size: 0.68rem; padding: 6px 4px; grid-column: 1/-1; border-color: rgba(244,63,94,0.4); color: var(--accent-rose);">⛈️ Fırtına (En Kötü)</button>
+                </div>
+                <div id="active-preset-badge" style="margin-top:8px; font-size:0.65rem; color: var(--text-tertiary); text-align:center;">Preset seçilmedi – manuel ayar aktif</div>
+            </div>
+
+            <!-- Data Transmission -->
+            <div class="control-section animate-in-delayed">
+                <div class="section-header">
+                    <div class="section-icon violet">📊</div>
+                    <span class="section-title">Veri İletim</span>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">Veri Deseni</div>
+                    <select id="data-pattern">
+                        <option value="alternating">Değişen (01010101)</option>
+                        <option value="all_ones">Tüm Birler</option>
+                        <option value="random" selected>Rastgele</option>
+                        <option value="burst">Burst (8'li)</option>
+                        <option value="prbs7">PRBS-7</option>
+                        <option value="ascii_hello">"HELLO" ASCII</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Bit Sayısı <span class="control-value" id="data-bits-val">32 bit</span>
+                    </div>
+                    <input type="range" id="data-bits" min="8" max="128" value="32" step="8">
+                </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="btn-group">
+                <button class="btn btn-primary btn-full" id="btn-run-sim">▶ Simülasyon</button>
+                <button class="btn btn-success btn-full" id="btn-run-test">🧪 Test</button>
+            </div>
+            <button class="btn btn-danger btn-full" id="btn-send-data" style="margin-top: -8px;">📡 6 km Veri Gönder</button>
+
+            <!-- COMSOL Export -->
+            <div class="control-section" style="border-color: rgba(139,92,246,0.3);">
+                <div class="section-header">
+                    <div class="section-icon violet">🔗</div>
+                    <span class="section-title">COMSOL Multiphysics</span>
+                </div>
+                <div class="btn-group" style="flex-direction: column; gap: 6px;">
+                    <button class="btn btn-outline btn-full" id="btn-comsol-java" style="font-size: 0.72rem;">
+                        📄 COMSOL Java Model (.java)
+                    </button>
+                    <button class="btn btn-outline btn-full" id="btn-comsol-matlab" style="font-size: 0.72rem;">
+                        📄 MATLAB LiveLink Script (.m)
+                    </button>
+                    <button class="btn btn-outline btn-full" id="btn-comsol-csv" style="font-size: 0.72rem;">
+                        📊 Atmosfer Grid CSV
+                    </button>
+                    <button class="btn btn-outline btn-full" id="btn-comsol-raypath" style="font-size: 0.72rem;">
+                        📊 Ray Path CSV
+                    </button>
+                    <button class="btn btn-outline btn-full" id="btn-comsol-params" style="font-size: 0.72rem;">
+                        ⚙️ COMSOL Parametreler (.txt)
+                    </button>
+                </div>
+                <div style="margin-top: 10px; font-size: 0.65rem; color: var(--text-tertiary); line-height: 1.6;">
+                    Export edilen dosyaları COMSOL'da:<br>
+                    • Java: Application Builder ile import<br>
+                    • MATLAB: LiveLink ile çalıştırın<br>
+                    • CSV: Interpolation Function olarak yükleyin<br>
+                    • Parametreler: Parameters → Load from File
+                </div>
+            </div>
+
+            <!-- Formula -->
+            <div class="formula-box">
+                <div class="formula-text">
+                    t = (n₁/n₂)·i + [(n₁/n₂)·cosθᵢ<br>
+                    − √(1 − (n₁/n₂)²·sin²θᵢ)]·n
+                </div>
+                <div style="text-align:center; margin-top:8px; font-size:0.62rem; color: var(--text-tertiary)">
+                    Vektörel Snell Yasası<br>
+                    n(T,P) = 1 + 0.000293 × (288.15/T) × (P/P₀)<br>
+                    σ²ᵣ = 1.23 × Cn² × k⁷ᐟ⁶ × L¹¹ᐟ⁶
+                </div>
+            </div>
+
+        </aside>
+
+        <!-- ── Main Content ───────────────────────────────── -->
+        <main class="main-content">
+
+            <!-- Link Budget Summary -->
+            <div class="results-grid animate-in" style="grid-template-columns: repeat(4, 1fr);">
+                <div class="result-card">
+                    <div class="result-label">LINK BÜTÇESİ</div>
+                    <div class="result-value emerald" id="result-link-margin">—</div>
+                    <div class="result-detail" id="link-margin-detail">—</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">ALICI GÜÇ (Pᵣₓ)</div>
+                    <div class="result-value cyan" id="result-rx-power">—</div>
+                    <div class="result-detail" id="rx-power-detail">—</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">ATMOSFERİK KAYIP</div>
+                    <div class="result-value amber" id="result-atm-loss">—</div>
+                    <div class="result-detail" id="atm-loss-detail">—</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">SCİNTİLASYON (σ²ᵣ)</div>
+                    <div class="result-value violet" id="result-scint">—</div>
+                    <div class="result-detail" id="scint-detail">—</div>
+                </div>
+            </div>
+
+            <!-- Results Grid -->
+            <div class="results-grid animate-in">
+                <div class="result-card">
+                    <div class="result-label">BIT HATA ORANI (BER)</div>
+                    <div class="result-value emerald" id="result-ber">—</div>
+                    <div class="result-detail" id="ber-detail">Veri gönderilmedi</div>
+                    <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width: 0%"></div></div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">YANAL SAPMA</div>
+                    <div class="result-value cyan" id="result-deviation">—</div>
+                    <div class="result-detail" id="dev-detail">—</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">KIRILMA OLAYLARI</div>
+                    <div class="result-value violet" id="result-refract">—</div>
+                    <div class="result-detail" id="refract-detail">—</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">İÇ YANSIMA (TIR)</div>
+                    <div class="result-value emerald" id="result-tir">—</div>
+                    <div class="result-detail" id="tir-detail">—</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">TOPLAM MESAFE</div>
+                    <div class="result-value blue" id="result-distance">—</div>
+                    <div class="result-detail">Işın yolu uzunluğu</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-label">SNELL YASASI DOĞRULAMA</div>
+                    <div class="verification-badge pass" id="result-snell">Bekleniyor...</div>
+                </div>
+            </div>
+
+            <!-- Canvas Views -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;" class="animate-in-delayed">
+                <div class="canvas-container">
+                    <div class="canvas-header">
+                        <div class="canvas-title">
+                            🔭 Üstten Görünüm (X-Y) – 6 km
+                            <span class="canvas-badge live">LIVE</span>
+                        </div>
+                        <div class="canvas-legend">
+                            <div class="legend-item"><div class="legend-swatch" style="background: #3b82f6"></div> Işın</div>
+                            <div class="legend-item"><div class="legend-swatch" style="background: #10b981"></div> Lazer</div>
+                            <div class="legend-item"><div class="legend-swatch" style="background: #f59e0b"></div> Alıcı</div>
+                        </div>
+                    </div>
+                    <div class="canvas-wrapper">
+                        <canvas id="canvas-top" style="height: 260px;"></canvas>
+                    </div>
+                </div>
+
+                <div class="canvas-container">
+                    <div class="canvas-header">
+                        <div class="canvas-title">
+                            📐 Yandan Görünüm (X-Z) – Yükseklik
+                            <span class="canvas-badge side">SIDE</span>
+                        </div>
+                        <div class="canvas-legend">
+                            <div class="legend-item"><div class="legend-swatch" style="background: #8b5cf6"></div> Kırılma</div>
+                            <div class="legend-item"><div class="legend-swatch" style="background: #f43f5e"></div> TIR</div>
+                        </div>
+                    </div>
+                    <div class="canvas-wrapper">
+                        <canvas id="canvas-side" style="height: 260px;"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bit Display -->
+            <div class="console-panel animate-in-delayed">
+                <div class="console-header">
+                    <div class="console-title">📡 6 km Veri İletim Görselleştirme</div>
+                </div>
+                <div style="padding: 14px;">
+                    <div style="margin-bottom: 12px;">
+                        <div class="result-label" style="margin-bottom: 6px;">GÖNDERİLEN BİTLER</div>
+                        <div class="bit-display" id="sent-bits">
+                            <span style="color: var(--text-tertiary); font-size: 0.72rem;">Henüz veri gönderilmedi. "📡 6 km Veri Gönder" butonuna basın.</span>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="result-label" style="margin-bottom: 6px;">ALINAN BİTLER (6 km sonra)</div>
+                        <div class="bit-display" id="recv-bits">
+                            <span style="color: var(--text-tertiary); font-size: 0.72rem;">—</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Snell Verification Table -->
+            <div class="console-panel animate-in-delayed">
+                <div class="console-header">
+                    <div class="console-title">📋 Snell Yasası Doğrulama Tablosu</div>
+                    <div class="verification-badge pass" style="font-size: 0.65rem;">n₁·sinθᵢ = n₂·sinθₜ</div>
+                </div>
+                <div style="padding: 14px; overflow-x: auto;">
+                    <table class="verify-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>n₁</th>
+                                <th>n₂</th>
+                                <th>θᵢ</th>
+                                <th>θₜ</th>
+                                <th>Hata</th>
+                                <th>Durum</th>
+                            </tr>
+                        </thead>
+                        <tbody id="verify-table-body">
+                            <tr>
+                                <td colspan="7" style="text-align: center; color: var(--text-tertiary);">
+                                    Simülasyon çalıştırıldığında kırılma olayları burada gösterilecek.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Comprehensive Transmission Test Panel -->
+            <div class="console-panel animate-in-delayed" id="transmission-test-panel">
+                <div class="console-header">
+                    <div class="console-title">🔬 Kapsamlı Veri Aktarım Testi (Ortam × Lens)</div>
+                    <button class="btn btn-primary" id="btn-comprehensive-test" style="padding: 5px 14px; font-size: 0.72rem;">
+                        ▶ Tüm Kombinasyonları Test Et
+                    </button>
+                </div>
+                <div style="padding: 14px;">
+                    <div id="comprehensive-test-status" style="font-size: 0.72rem; color: var(--text-tertiary); margin-bottom: 10px;">
+                        Butona basarak 6 ortam × 6 lens = 36 kombinasyonu test edin. Her kombinasyon için % veri aktarım oranı hesaplanır.
+                    </div>
+
+                    <!-- Summary cards -->
+                    <div id="test-summary-cards" style="display:none; grid-template-columns: repeat(3,1fr); gap:8px; margin-bottom:14px;" class="results-grid">
+                        <div class="result-card">
+                            <div class="result-label">ORTALAMA BAŞARI</div>
+                            <div class="result-value emerald" id="test-avg-rate">—</div>
+                        </div>
+                        <div class="result-card">
+                            <div class="result-label">EN İYİ KOMBİNASYON</div>
+                            <div class="result-value cyan" id="test-best" style="font-size:0.75rem;">—</div>
+                        </div>
+                        <div class="result-card">
+                            <div class="result-label">EN KÖTÜ KOMBİNASYON</div>
+                            <div class="result-value amber" id="test-worst" style="font-size:0.75rem;">—</div>
+                        </div>
+                    </div>
+
+                    <!-- Results matrix table -->
+                    <div style="overflow-x: auto;">
+                        <table class="verify-table" id="transmission-test-table" style="display:none;">
+                            <thead>
+                                <tr>
+                                    <th>Ortam</th>
+                                    <th>Lens</th>
+                                    <th>% Başarı</th>
+                                    <th>Doğru Bit</th>
+                                    <th>Lens Kazancı</th>
+                                    <th>Hava</th>
+                                    <th>Cn²</th>
+                                    <th>P_rx (dBm)</th>
+                                    <th>Durum</th>
+                                </tr>
+                            </thead>
+                            <tbody id="transmission-test-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Link Budget Details -->
+            <div class="console-panel animate-in-delayed">
+                <div class="console-header">
+                    <div class="console-title">📊 6 km Link Bütçesi Detayı</div>
+                </div>
+                <div style="padding: 14px; overflow-x: auto;">
+                    <table class="verify-table" id="link-budget-table">
+                        <thead>
+                            <tr>
+                                <th>Parametre</th>
+                                <th>Değer</th>
+                                <th>Birim</th>
+                                <th>Açıklama</th>
+                            </tr>
+                        </thead>
+                        <tbody id="link-budget-body">
+                            <tr><td colspan="4" style="text-align:center; color: var(--text-tertiary)">Simülasyon çalıştırıldığında doldurulacak.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Console -->
+            <div class="console-panel animate-in-delayed">
+                <div class="console-header">
+                    <div class="console-title">🖥️ Konsol</div>
+                    <button class="btn btn-outline" onclick="document.getElementById('console-body').innerHTML = ''" style="padding: 4px 12px; font-size: 0.68rem;">Temizle</button>
+                </div>
+                <div class="console-body" id="console-body"></div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <script src="engine.js"></script>
+    <script src="comsol.js"></script>
+    <script src="renderer.js"></script>
+    <script src="app.js"></script>
+
+</body>
+</html>
