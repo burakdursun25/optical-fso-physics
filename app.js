@@ -196,6 +196,8 @@ document.addEventListener('DOMContentLoaded', () => {
             laserPower_mW: parseFloat(laserPowerSlider.value),
             laserPower_W: parseFloat(laserPowerSlider.value) / 1000,
             receiverDiamM: parseFloat(receiverDiamSlider.value),
+            receiverSensitivity_dBm: -40,
+            pointingErrorRad: 0,
             beamDivRad: parseFloat(beamDivSlider.value) / 1000,
             lensType: lensTypeEl ? lensTypeEl.value : 'none',
         };

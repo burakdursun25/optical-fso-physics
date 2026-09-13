@@ -1,8 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import math
+import os
 
 from backend.engine import (Vec3, AtmosphereGrid, RayTracer, DataTransmissionSimulator,
                              AtmosphericLoss, vectorialSnellLaw, verifySnellLaw,
@@ -11,31 +14,36 @@ from backend.comsol import COMSOLBridge
 
 app = FastAPI(title="FSO Physics Engine Backend")
 
+# ── Frontend statik dosyaları sun ───────────────────────────
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Enable CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ── Pydantic Request Models ──────────────────────────────────
 class SimParams(BaseModel):
-    gridX: int = 60
-    gridY: int = 10
-    gridZ: int = 10
-    cellSize: float = 100.0
+    gridX: int = Field(60, ge=1, le=500)
+    gridY: int = Field(10, ge=1, le=100)
+    gridZ: int = Field(10, ge=1, le=100)
+    cellSize: float = Field(100.0, gt=0.0, le=5000.0)
     thermalProfile: str = "gradient"
-    baseTemp: float = 25.0
-    deltaT: float = 15.0
+    baseTemp: float = Field(25.0, ge=-80.0, le=80.0)
+    deltaT: float = Field(15.0, ge=0.0, le=100.0)
     weather: str = "clear"
     Cn2Level: str = "moderate"
-    windSpeed: float = 5.0
-    wavelengthNm: int = 1550
-    laserPower_mW: float = 10.0
-    receiverDiamM: float = 0.10
-    beamDivRad: float = 0.001
+    windSpeed: float = Field(5.0, ge=0.0, le=100.0)
+    wavelengthNm: int = Field(1550, ge=200, le=10000)
+    laserPower_mW: float = Field(10.0, gt=0.0, le=100000.0)
+    receiverDiamM: float = Field(0.10, gt=0.0, le=100.0)
+    receiverSensitivity_dBm: float = Field(-40.0, ge=-200.0, le=100.0)
+    pointingErrorRad: float = Field(0.0, ge=0.0, le=0.1)
+    beamDivRad: float = Field(0.001, ge=0.0, le=1.0)
     # Lens system
     lensType: str = "none"
     lensFocalLength_m: Optional[float] = None
@@ -46,20 +54,20 @@ class SimParams(BaseModel):
 class SendDataParams(BaseModel):
     simParams: SimParams
     pattern: str = "random"
-    numBits: int = 32
+    numBits: int = Field(32, ge=1, le=10000)
 
 class TransmissionTestParams(BaseModel):
-    gridX: int = 30
-    gridY: int = 6
-    gridZ: int = 6
-    cellSize: float = 200.0
-    wavelengthNm: float = 1550.0
-    numBits: int = 32
+    gridX: int = Field(30, ge=1, le=500)
+    gridY: int = Field(6, ge=1, le=100)
+    gridZ: int = Field(6, ge=1, le=100)
+    cellSize: float = Field(200.0, gt=0.0, le=5000.0)
+    wavelengthNm: float = Field(1550.0, ge=200.0, le=10000.0)
+    numBits: int = Field(32, ge=1, le=10000)
     pattern: str = "alternating"
-    laserPower_mW: float = 10.0
-    receiverDiamM: float = 0.10
-    beamDivRad: float = 0.001
-    receiverSensitivity_dBm: float = -40.0
+    laserPower_mW: float = Field(10.0, gt=0.0, le=100000.0)
+    receiverDiamM: float = Field(0.10, gt=0.0, le=100.0)
+    beamDivRad: float = Field(0.001, ge=0.0, le=1.0)
+    receiverSensitivity_dBm: float = Field(-40.0, ge=-200.0, le=100.0)
 
 
 # ── Serialization Helpers ─────────────────────────────────────
@@ -141,6 +149,7 @@ def run_simulation_backend(p: SimParams):
     base_temp = p.baseTemp
     delta_t = p.deltaT
     wind_speed = p.windSpeed
+    humidity = 50.0
 
     if p.environmentPreset:
         preset = EnvironmentPresets.get_preset(p.environmentPreset)
@@ -150,12 +159,13 @@ def run_simulation_backend(p: SimParams):
         base_temp = preset["baseTemp"]
         delta_t = preset["deltaT"]
         wind_speed = preset["windSpeed"]
+        humidity = preset["humidity"]
 
     atmosphere = AtmosphereGrid(p.gridX, p.gridY, p.gridZ, p.cellSize)
     atmosphere.applyThermalProfile(thermal_profile, {
         "baseTemp": base_temp,
         "deltaT": delta_t,
-        "humidity": 50.0,
+        "humidity": humidity,
         "windSpeed": wind_speed,
         "Cn2Level": cn2_level,
         "wavelengthUm": wavelengthUm,
@@ -188,12 +198,13 @@ def run_simulation_backend(p: SimParams):
         "beamDivRad": lensed_beam["divergenceRad"],
         "receiverDiamM": lensed_beam["receiverDiamM"],
         "beamDiamM": 0.004,
-        "Cn2": trace["avgCn2"] if trace["avgCn2"] > 0 else 1e-15
+        "Cn2": trace["avgCn2"] if trace["avgCn2"] > 0 else 1e-15,
+        "receiverSensitivity_dBm": p.receiverSensitivity_dBm
     })
     # Apply lens transmittance power penalty
     link_budget["P_rx_dBm"] += 10.0 * math.log10(max(1e-300, lensed_beam["transmittance"]))
     link_budget["P_rx_W"] = math.pow(10.0, link_budget["P_rx_dBm"] / 10.0) / 1000.0
-    link_budget["linkMargin_dB"] = link_budget["P_rx_dBm"] - (-40.0)
+    link_budget["linkMargin_dB"] = link_budget["P_rx_dBm"] - p.receiverSensitivity_dBm
     link_budget["linkViable"] = link_budget["linkMargin_dB"] > 0
     link_budget["lensType"] = p.lensType
     link_budget["lensGain_dB"] = round(lens.get_link_budget_gain_dB(distance, p.beamDivRad, p.receiverDiamM, 0.004), 2)
@@ -201,6 +212,30 @@ def run_simulation_backend(p: SimParams):
     return atmosphere, trace, link_budget, sourcePos, targetPos, recvR
 
 # ── Endpoints ────────────────────────────────────────────────
+@app.get("/")
+def serve_index():
+    return FileResponse(os.path.join(_ROOT, "index.html"))
+
+@app.get("/style.css")
+def serve_css():
+    return FileResponse(os.path.join(_ROOT, "style.css"), media_type="text/css")
+
+@app.get("/engine.js")
+def serve_engine_js():
+    return FileResponse(os.path.join(_ROOT, "engine.js"), media_type="application/javascript")
+
+@app.get("/comsol.js")
+def serve_comsol_js():
+    return FileResponse(os.path.join(_ROOT, "comsol.js"), media_type="application/javascript")
+
+@app.get("/renderer.js")
+def serve_renderer_js():
+    return FileResponse(os.path.join(_ROOT, "renderer.js"), media_type="application/javascript")
+
+@app.get("/app.js")
+def serve_app_js():
+    return FileResponse(os.path.join(_ROOT, "app.js"), media_type="application/javascript")
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "backend": "python"}
@@ -224,26 +259,12 @@ def simulate(p: SimParams):
 def send_data(params: SendDataParams):
     try:
         p = params.simParams
-        wavelengthUm = p.wavelengthNm / 1000.0
-        laserPower_W = p.laserPower_mW / 1000.0
-
-        atmosphere = AtmosphereGrid(p.gridX, p.gridY, p.gridZ, p.cellSize)
-        atmosphere.applyThermalProfile(p.thermalProfile, {
-            "baseTemp": p.baseTemp,
-            "deltaT": p.deltaT,
-            "humidity": 50.0,
-            "windSpeed": p.windSpeed,
-            "Cn2Level": p.Cn2Level,
-            "wavelengthUm": wavelengthUm,
-            "useEdlen": True
-        })
-
-        rayTracer = RayTracer(atmosphere)
-        sourcePos = Vec3(0.5 * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5)
-        targetPos = Vec3((p.gridX - 0.5) * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5)
-        recvR = p.receiverDiamM / 2.0
-
-        simulator = DataTransmissionSimulator(rayTracer, sourcePos, targetPos, recvR)
+        _, trace, link_budget, sourcePos, targetPos, recvR = run_simulation_backend(p)
+        simulator = DataTransmissionSimulator(
+            None, sourcePos, targetPos, recvR,
+            trace=trace,
+            linkBudget=link_budget
+        )
         data = DataTransmissionSimulator.generateTestData(params.pattern, params.numBits)
 
         results = simulator.sendPacket(data)

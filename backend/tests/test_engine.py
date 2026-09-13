@@ -71,6 +71,15 @@ def test_geometric_loss():
     expectedBeamDiam = 0.004 + 2.0 * 0.001 * 6000.0
     assert abs(geo["beamDiamAtReceiver"] - expectedBeamDiam) < 0.01
 
+def test_pointing_error_reduces_received_fraction():
+    aligned = AtmosphericLoss.geometricLoss(6000.0, 0.001, 0.1, 0.004, 0.0)
+    misaligned = AtmosphericLoss.geometricLoss(6000.0, 0.001, 0.1, 0.004, 1e-4)
+
+    assert misaligned["pointingOffsetM"] > 0.0
+    assert misaligned["pointingCoupling"] < 1.0
+    assert misaligned["effectiveCapturedFraction"] < aligned["effectiveCapturedFraction"]
+    assert misaligned["loss_dB"] > aligned["loss_dB"]
+
 def test_edlen_equation():
     atm = AtmosphereGrid(2, 2, 2, 1.0)
     n_15C = atm.refractiveIndexSimple(15.0, 101325.0)
@@ -226,3 +235,64 @@ def test_transmission_result_has_required_fields():
     for r in results:
         for field in required:
             assert field in r, f"Result missing field '{field}'"
+
+
+def test_packet_reuses_ray_trace_for_one_bits():
+    class CountingTracer:
+        def __init__(self):
+            self.calls = 0
+
+        def trace(self, origin, direction):
+            self.calls += 1
+            return {
+                "avgCn2": 1e-15,
+                "exitPosition": Vec3(10.0, 0.0, 0.0),
+                "path": [],
+                "refractionEvents": [],
+                "success": True,
+                "totalDistance": 10.0,
+                "totalInternalReflections": 0,
+                "steps": 1,
+                "exitDirection": direction
+            }
+
+    tracer = CountingTracer()
+    simulator = DataTransmissionSimulator(tracer, Vec3(), Vec3(10.0, 0.0, 0.0), 1.0)
+    simulator.sendPacket([1, 1, 1, 1])
+
+    assert tracer.calls == 1
+
+
+def test_packet_uses_supplied_trace_and_link_budget():
+    class FailingTracer:
+        def trace(self, origin, direction):
+            raise AssertionError("A supplied trace should be reused")
+
+    trace = {
+        "avgCn2": 1e-15,
+        "exitPosition": Vec3(10.0, 0.0, 0.0),
+        "path": [],
+        "refractionEvents": [],
+        "success": True,
+        "totalDistance": 10.0,
+        "totalInternalReflections": 0,
+        "steps": 1,
+        "exitDirection": Vec3(1.0, 0.0, 0.0)
+    }
+    link_budget = {
+        "P_rx_dBm": -20.0,
+        "linkViable": True
+    }
+
+    simulator = DataTransmissionSimulator(
+        FailingTracer(),
+        Vec3(),
+        Vec3(10.0, 0.0, 0.0),
+        1.0,
+        trace=trace,
+        linkBudget=link_budget
+    )
+    result = simulator.sendPacket([1])
+
+    assert result["correctBits"] == 1
+    assert result["results"][0]["linkBudget"] is link_budget

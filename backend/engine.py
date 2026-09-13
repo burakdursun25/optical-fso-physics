@@ -184,7 +184,8 @@ class AtmosphereGrid:
             # Perfect JS signed 32-bit replication in Python using numpy signed integer overflows
             h = np.int64(ix) * 374761393 + np.int64(iy) * 668265263 + np.int64(iz) * 1274126177
             h = np.int32(h)
-            h = np.int32((h ^ (h >> 13)) * 1274126177)
+            with np.errstate(over='ignore'):
+                h = np.int32((h ^ (h >> 13)) * 1274126177)
             return float(h & np.int32(0x7fffffff)) / 2147483647.0
 
         def noise3D(x, y, z):
@@ -414,15 +415,23 @@ class AtmosphericLoss:
         }
 
     @staticmethod
-    def geometricLoss(distance_m, beamDivergenceRad=1e-3, receiverDiameterM=0.1, beamDiameterM=0.004):
+    def geometricLoss(distance_m, beamDivergenceRad=1e-3, receiverDiameterM=0.1,
+                      beamDiameterM=0.004, pointingErrorRad=0.0):
         beamDiamAtReceiver = beamDiameterM + 2.0 * beamDivergenceRad * distance_m
         ratio = receiverDiameterM / beamDiamAtReceiver
         capturedFraction = min(1.0, ratio * ratio)
-        loss_dB = -10.0 * math.log10(max(1e-300, capturedFraction))
+        pointingOffsetM = distance_m * math.tan(max(0.0, pointingErrorRad))
+        beamRadiusM = beamDiamAtReceiver / 2.0
+        pointingCoupling = math.exp(-2.0 * math.pow(pointingOffsetM / max(1e-12, beamRadiusM), 2.0))
+        effectiveCapturedFraction = capturedFraction * pointingCoupling
+        loss_dB = -10.0 * math.log10(max(1e-300, effectiveCapturedFraction))
 
         return {
             "beamDiamAtReceiver": beamDiamAtReceiver,
             "capturedFraction": capturedFraction,
+            "pointingOffsetM": pointingOffsetM,
+            "pointingCoupling": pointingCoupling,
+            "effectiveCapturedFraction": effectiveCapturedFraction,
             "loss_dB": loss_dB,
             "beamSpreadArea": math.PI * (beamDiamAtReceiver / 2.0) * (beamDiamAtReceiver / 2.0) if hasattr(math, "PI") else 3.141592653589793 * (beamDiamAtReceiver / 2.0) * (beamDiamAtReceiver / 2.0)
         }
@@ -459,12 +468,15 @@ class AtmosphericLoss:
         beamDivRad = float(params.get("beamDivRad", 1e-3))
         receiverDiamM = float(params.get("receiverDiamM", 0.1))
         beamDiamM = float(params.get("beamDiamM", 0.004))
+        pointingErrorRad = float(params.get("pointingErrorRad", 0.0))
         Cn2 = float(params.get("Cn2", 1e-15))
         receiverSensitivity_dBm = float(params.get("receiverSensitivity_dBm", -40.0))
 
         P_tx_dBm = 10.0 * math.log10(laserPower_W * 1000.0)
         absorption = AtmosphericLoss.absorptionLoss(distance_m, weather, wavelengthNm)
-        geometric = AtmosphericLoss.geometricLoss(distance_m, beamDivRad, receiverDiamM, beamDiamM)
+        geometric = AtmosphericLoss.geometricLoss(
+            distance_m, beamDivRad, receiverDiamM, beamDiamM, pointingErrorRad
+        )
         scintillation = AtmosphericLoss.scintillationIndex(distance_m, Cn2, wavelengthNm * 1e-9)
 
         scintPenalty = 5.0 * math.log10(1.0 + scintillation["sigma2_R"]) if (scintillation["sigma2_R"] < 5.0) else 10.0
@@ -679,12 +691,26 @@ class RayTracer:
 
 # ── Data Transmission Simulator (6 km) ───────────────────────
 class DataTransmissionSimulator:
-    def __init__(self, rayTracer, sourcePos, targetPos, receiverRadius=0.5):
+    def __init__(self, rayTracer, sourcePos, targetPos, receiverRadius=0.5,
+                 trace=None, linkBudget=None):
         self.rayTracer = rayTracer
         self.sourcePos = sourcePos
         self.targetPos = targetPos
         self.receiverRadius = receiverRadius
         self.beamDivergence = 0.001
+        self._cachedTrace = trace
+        self._cachedLinkBudget = linkBudget
+
+    def _getTransmissionState(self):
+        if self._cachedTrace is None:
+            direction = self.targetPos.sub(self.sourcePos).normalize()
+            self._cachedTrace = self.rayTracer.trace(self.sourcePos, direction)
+            distance = self.sourcePos.sub(self.targetPos).length()
+            self._cachedLinkBudget = AtmosphericLoss.linkBudget({
+                "distance_m": distance,
+                "Cn2": self._cachedTrace["avgCn2"] if self._cachedTrace["avgCn2"] > 0 else 1e-15
+            })
+        return self._cachedTrace, self._cachedLinkBudget
 
     def sendBit(self, bit):
         if bit == 0:
@@ -697,14 +723,7 @@ class DataTransmissionSimulator:
                 "lateralDeviation": float("inf")
             }
 
-        dir = self.targetPos.sub(self.sourcePos).normalize()
-        trace = self.rayTracer.trace(self.sourcePos, dir)
-        distance = self.sourcePos.sub(self.targetPos).length()
-
-        linkBudget = AtmosphericLoss.linkBudget({
-            "distance_m": distance,
-            "Cn2": trace["avgCn2"] if trace["avgCn2"] > 0 else 1e-15
-        })
+        trace, linkBudget = self._getTransmissionState()
 
         received = 0
         lateralDeviation = float("inf")
