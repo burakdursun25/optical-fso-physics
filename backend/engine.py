@@ -1,5 +1,34 @@
 import math
+from typing import Union
+
 import numpy as np
+
+
+def crc16_ccitt(data: Union[bytes, bytearray, memoryview, str], init: int = 0xFFFF) -> int:
+    """Compute CRC-16/CCITT-FALSE checksum for a payload.
+
+    The implementation matches Python's binascii.crc_hqx(data, 0xFFFF) behavior,
+    which is the common CRC-CCITT variant used in serial protocols and packet
+    validation routines.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+
+    crc = init & 0xFFFF
+    for byte in data:
+        crc ^= (byte << 8)
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc & 0xFFFF
+
+
+def validate_crc(data: Union[bytes, bytearray, memoryview, str], checksum: int, init: int = 0xFFFF) -> bool:
+    """Validate a CRC checksum against payload bytes."""
+    return crc16_ccitt(data, init) == (checksum & 0xFFFF)
+
 
 # ── Vec3 Utility ──────────────────────────────────────────
 class Vec3:

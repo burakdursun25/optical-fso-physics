@@ -1,7 +1,9 @@
+import binascii
 import math
 from backend.engine import (Vec3, AtmosphereGrid, RayTracer, DataTransmissionSimulator,
                              AtmosphericLoss, vectorialSnellLaw, verifySnellLaw,
-                             LensSystem, EnvironmentPresets, ComprehensiveTransmissionTest)
+                             LensSystem, EnvironmentPresets, ComprehensiveTransmissionTest,
+                             crc16_ccitt, validate_crc)
 
 # ── Original Physics Tests (T1-T11) ──────────────────────────
 
@@ -60,6 +62,14 @@ def test_tangential_conservation():
     i_tan = i.sub(n.scale(i.dot(n)))
     t_tan = result["direction"].sub(n.scale(result["direction"].dot(n)))
     assert abs(n1 * i_tan.length() - n2 * t_tan.length()) < 1e-10
+
+def test_crc16_validation_round_trip():
+    payload = b"OPTICAL-FSO-CRC"
+    expected = binascii.crc_hqx(payload, 0xFFFF)
+    assert crc16_ccitt(payload) == expected
+    assert validate_crc(payload, expected)
+    assert not validate_crc(payload, expected ^ 0x1234)
+
 
 def test_beer_lambert_loss():
     loss = AtmosphericLoss.absorptionLoss(6000.0, "clear", 1550.0)
