@@ -1,0 +1,21 @@
+{
+  "input": {
+    "grid": [8, 4, 4],
+    "cellSize": 100.0,
+    "profile": "gradient",
+    "seed": 42
+  },
+  "trace": {
+    "success": true,
+    "steps": 8,
+    "pathPoints": 9,
+    "refractionEvents": 7,
+    "totalDistance": 750.0000000001,
+    "avgCn2": 2.692170557651232e-16,
+    "exit": {
+      "x": 800.0000000001,
+      "y": 200.0,
+      "z": 200.0
+    }
+  }
+}

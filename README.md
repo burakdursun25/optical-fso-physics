@@ -37,6 +37,21 @@ Proje kök dizininden:
 python -m pytest -q
 ```
 
+Testler görsel arayüze ihtiyaç duymaz ve `tests/` altında merkezi olarak gruplanır:
+
+- `tests/unit/math/`: vektör ve Snell yasası matematiği
+- `tests/unit/physics/`: atmosfer, kayıp, lens, CRC ve veri iletimi
+- `tests/regression/`: sabit girdili deterministik ray-trace fixture kontrolleri
+- `tests/fixtures/`: regresyon için beklenen JSON çıktıları
+
+Makine tarafından okunabilir JUnit XML ve okunabilir Markdown raporu üretmek için:
+
+```bash
+python scripts/run_test_report.py
+```
+
+Çıktılar `reports/test-results.xml` ve `reports/test_report.md` dosyalarına yazılır.
+
 ## Rapor
 
 CRC doğrulama sonuçları ve proje değerlendirmesi `reports/optical_fso_crc_report.md` dosyasında, PDF çıktısı ise aynı klasörde bulunur.
