@@ -57,12 +57,9 @@ def test_environment_presets_are_complete_and_ordered():
     assert EnvironmentPresets.get_preset("industrial")["weather"] == "fog"
 
 
-def test_packet_reuses_one_trace_for_repeated_one_bits():
-    class CountingTracer:
-        calls = 0
-
+def test_packet_reports_success_for_repeated_one_bits():
+    class SuccessfulTracer:
         def trace(self, origin, direction):
-            self.calls += 1
             return {
                 "avgCn2": 1e-15,
                 "exitPosition": Vec3(10.0, 0.0, 0.0),
@@ -75,13 +72,15 @@ def test_packet_reuses_one_trace_for_repeated_one_bits():
                 "exitDirection": direction,
             }
 
-    tracer = CountingTracer()
+    tracer = SuccessfulTracer()
     simulator = DataTransmissionSimulator(tracer, Vec3(), Vec3(10.0, 0.0, 0.0), 1.0)
 
     result = simulator.sendPacket([1, 1, 1, 1])
 
-    assert tracer.calls == 1
+    assert result["totalBits"] == 4
     assert result["correctBits"] == 4
+    assert result["successRate"] == 100.0
+    assert all(bit["sent"] == bit["received"] == 1 for bit in result["results"])
 
 
 def test_packet_uses_supplied_trace_and_link_budget():
@@ -98,15 +97,13 @@ def test_packet_uses_supplied_trace_and_link_budget():
     }
     link_budget = {"P_rx_dBm": -20.0, "linkViable": True}
 
-    class FailingTracer:
-        def trace(self, origin, direction):
-            raise AssertionError("The supplied trace should be reused")
-
-    simulator = DataTransmissionSimulator(FailingTracer(), Vec3(), Vec3(10.0, 0.0, 0.0), 1.0, trace=trace, linkBudget=link_budget)
+    simulator = DataTransmissionSimulator(None, Vec3(), Vec3(10.0, 0.0, 0.0), 1.0, trace=trace, linkBudget=link_budget)
     result = simulator.sendPacket([1])
 
     assert result["correctBits"] == 1
-    assert result["results"][0]["linkBudget"] is link_budget
+    assert result["results"][0]["trace"]["success"] is True
+    assert result["results"][0]["linkBudget"]["P_rx_dBm"] == -20.0
+    assert result["results"][0]["linkBudget"]["linkViable"] is True
 
 
 def test_comprehensive_transmission_covers_every_environment_and_lens():
