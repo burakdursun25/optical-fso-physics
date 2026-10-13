@@ -106,6 +106,43 @@ def test_packet_uses_supplied_trace_and_link_budget():
     assert result["results"][0]["linkBudget"]["linkViable"] is True
 
 
+def test_zero_bits_fail_when_link_is_unavailable():
+    trace = {"success": False, "exitPosition": None, "avgCn2": 0.0}
+    link_budget = {"P_rx_dBm": -200.0, "linkViable": False}
+    simulator = DataTransmissionSimulator(
+        None, Vec3(), Vec3(10.0, 0.0, 0.0), 1.0,
+        trace=trace, linkBudget=link_budget,
+    )
+
+    result = simulator.sendPacket([0, 0])
+
+    assert result["correctBits"] == 0
+    assert result["bitErrorRate"] == 1.0
+    assert result["successRate"] == 0.0
+    assert result["missedZeros"] == 2
+    assert all(bit["linkBudget"] == link_budget for bit in result["results"])
+    assert all(bit["lateralDeviation"] is None for bit in result["results"])
+
+
+def test_zero_bits_are_correct_when_link_is_available():
+    trace = {
+        "success": True,
+        "exitPosition": Vec3(10.0, 0.0, 0.0),
+        "avgCn2": 1e-15,
+    }
+    link_budget = {"P_rx_dBm": -20.0, "linkViable": True}
+    simulator = DataTransmissionSimulator(
+        None, Vec3(), Vec3(10.0, 0.0, 0.0), 1.0,
+        trace=trace, linkBudget=link_budget,
+    )
+
+    result = simulator.sendPacket([0])
+
+    assert result["correctBits"] == 1
+    assert result["results"][0]["received"] == 0
+    assert result["results"][0]["correct"] is True
+
+
 def test_comprehensive_transmission_covers_every_environment_and_lens():
     from backend.engine import ComprehensiveTransmissionTest
 

@@ -26,7 +26,19 @@ Python bağımlılıklarını sanal ortamda kurun:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r backend/requirements.txt
+pip install -r requirements-dev.txt
+```
+
+Uygulamayı API ve web arayüzüyle başlatın:
+
+```bash
+uvicorn backend.app:app --reload
+```
+
+Arayüz `http://127.0.0.1:8000` adresinde açılır. Varsayılan yapılandırma aynı-origin isteklerle çalışır ve CORS'u açmaz. Arayüzü farklı bir origin'de barındırıyorsanız API başlamadan önce izin verilen tam origin'leri virgülle ayarlayın:
+
+```bash
+export FSO_CORS_ORIGINS="https://fso.example.com"
 ```
 
 ## Testler
@@ -41,6 +53,7 @@ Testler görsel arayüze ihtiyaç duymaz ve `tests/` altında merkezi olarak gru
 
 - `tests/unit/math/`: vektör ve Snell yasası matematiği
 - `tests/unit/physics/`: atmosfer, kayıp, lens, CRC ve veri iletimi
+- `tests/unit/`: API parametre sınırları ve COMSOL export kontrolleri
 - `tests/regression/`: sabit girdili deterministik ray-trace fixture kontrolleri
 - `tests/fixtures/`: regresyon için beklenen JSON çıktıları
 
@@ -59,7 +72,7 @@ CRC doğrulama sonuçları ve proje değerlendirmesi `reports/optical_fso_crc_re
 ## Dizin yapısı
 
 - `backend/`: Python tabanlı fizik ve iletim motoru
-- `backend/tests/`: otomatik testler
+- `tests/`: otomatik Python testleri ve regresyon fixture'ları
 - `reports/`: doğrulama raporları
 - `app.js`, `renderer.js`, `index.html`, `style.css`: kullanıcı arayüzü
 - `comsol.js`, `backend/comsol.py`: COMSOL ile ilgili yardımcı katmanlar

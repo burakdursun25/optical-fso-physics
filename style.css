@@ -432,6 +432,22 @@ canvas {
     gap: 12px;
 }
 
+.result-summary-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.canvas-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.test-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
 .result-card {
     background: var(--bg-card);
     border: 1px solid var(--border-color);
@@ -687,6 +703,47 @@ canvas {
         border-right: none;
         border-bottom: 1px solid var(--border-color);
         max-height: 400px;
+    }
+
+    .result-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 640px) {
+    .header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 14px;
+        padding: 16px;
+    }
+
+    .header > div:last-child {
+        flex-wrap: wrap;
+    }
+
+    .header-title {
+        font-size: 1.1rem;
+    }
+
+    .main-content {
+        padding: 12px;
+    }
+
+    .canvas-grid,
+    .test-summary-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .canvas-header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 8px;
+        padding: 12px;
+    }
+
+    .control-section {
+        padding: 14px;
     }
 }
 

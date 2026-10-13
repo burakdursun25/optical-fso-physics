@@ -10,8 +10,8 @@
     "steps": 8,
     "pathPoints": 9,
     "refractionEvents": 7,
-    "totalDistance": 750.0000000001,
-    "avgCn2": 2.692170557651232e-16,
+    "totalDistance": 800.0000000001,
+    "avgCn2": 2.7180568130132557e-16,
     "exit": {
       "x": 800.0000000001,
       "y": 200.0,

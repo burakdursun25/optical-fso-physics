@@ -38,8 +38,7 @@ class COMSOLBridge {
                     const idx = atm.index(ix, iy, iz);
                     const n = atm.grid[idx];
                     const T = atm.temperature[idx];
-                    // Approximate pressure from altitude (barometric formula)
-                    const P = 101325 * Math.exp(-0.0001184 * z);
+                    const P = atm.pressure[idx];
                     csv += `${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}, ${n.toFixed(10)}, ${T.toFixed(2)}, ${P.toFixed(1)}\n`;
                 }
             }

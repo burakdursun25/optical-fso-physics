@@ -2,8 +2,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+import logging
+from pydantic import BaseModel, Field, model_validator
+from typing import Any, Dict, List, Literal, Optional
 import math
 import os
 
@@ -13,30 +14,47 @@ from backend.engine import (Vec3, AtmosphereGrid, RayTracer, DataTransmissionSim
 from backend.comsol import COMSOLBridge
 
 app = FastAPI(title="FSO Physics Engine Backend")
+logger = logging.getLogger(__name__)
+MAX_GRID_CELLS = 1_000_000
+MAX_ATMOSPHERE_HEIGHT_M = 20_000.0
+
+
+def validate_grid_limits(grid_x: int, grid_y: int, grid_z: int, cell_size: float) -> None:
+    if grid_x * grid_y * grid_z > MAX_GRID_CELLS:
+        raise ValueError(f"grid exceeds the {MAX_GRID_CELLS} cell limit")
+    if grid_z * cell_size > MAX_ATMOSPHERE_HEIGHT_M:
+        raise ValueError(f"grid height exceeds {MAX_ATMOSPHERE_HEIGHT_M:g} m")
+
+
+def internal_server_error(error: Exception) -> HTTPException:
+    logger.error("Unhandled simulation request failure", exc_info=(type(error), error, error.__traceback__))
+    return HTTPException(status_code=500, detail="Internal server error")
 
 # ── Frontend statik dosyaları sun ───────────────────────────
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Enable CORS for frontend integration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_CORS_ORIGINS = [origin.strip() for origin in os.getenv("FSO_CORS_ORIGINS", "").split(",") if origin.strip()]
+if _CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
 
 # ── Pydantic Request Models ──────────────────────────────────
 class SimParams(BaseModel):
-    gridX: int = Field(60, ge=1, le=500)
+    gridX: int = Field(60, ge=1, le=600)
     gridY: int = Field(10, ge=1, le=100)
     gridZ: int = Field(10, ge=1, le=100)
     cellSize: float = Field(100.0, gt=0.0, le=5000.0)
-    thermalProfile: str = "gradient"
+    thermalProfile: Literal["uniform", "gradient", "turbulent", "hotspot", "layered", "coastal"] = "gradient"
     baseTemp: float = Field(25.0, ge=-80.0, le=80.0)
     deltaT: float = Field(15.0, ge=0.0, le=100.0)
-    weather: str = "clear"
-    Cn2Level: str = "moderate"
+    humidity: float = Field(50.0, ge=0.0, le=100.0)
+    weather: Literal["clear", "haze", "fog", "rain", "snow", "storm"] = "clear"
+    Cn2Level: Literal["weak", "moderate", "strong"] = "moderate"
     windSpeed: float = Field(5.0, ge=0.0, le=100.0)
     wavelengthNm: int = Field(1550, ge=200, le=10000)
     laserPower_mW: float = Field(10.0, gt=0.0, le=100000.0)
@@ -45,15 +63,20 @@ class SimParams(BaseModel):
     pointingErrorRad: float = Field(0.0, ge=0.0, le=0.1)
     beamDivRad: float = Field(0.001, ge=0.0, le=1.0)
     # Lens system
-    lensType: str = "none"
+    lensType: Literal["none", "collimating", "focusing", "galilean_telescope", "cassegrain", "diverging"] = "none"
     lensFocalLength_m: Optional[float] = None
     lensAperture_m: Optional[float] = None
     # Environment preset (if set, overrides thermal/weather/Cn2 params)
-    environmentPreset: Optional[str] = None
+    environmentPreset: Optional[Literal["urban", "maritime", "desert", "mountain", "industrial", "arctic", "storm"]] = None
+
+    @model_validator(mode="after")
+    def validate_grid(self):
+        validate_grid_limits(self.gridX, self.gridY, self.gridZ, self.cellSize)
+        return self
 
 class SendDataParams(BaseModel):
     simParams: SimParams
-    pattern: str = "random"
+    pattern: Literal["alternating", "all_ones", "all_zeros", "random", "burst", "prbs7", "ascii_hello"] = "random"
     numBits: int = Field(32, ge=1, le=10000)
 
 class TransmissionTestParams(BaseModel):
@@ -63,11 +86,16 @@ class TransmissionTestParams(BaseModel):
     cellSize: float = Field(200.0, gt=0.0, le=5000.0)
     wavelengthNm: float = Field(1550.0, ge=200.0, le=10000.0)
     numBits: int = Field(32, ge=1, le=10000)
-    pattern: str = "alternating"
+    pattern: Literal["alternating", "all_ones", "all_zeros", "random", "burst", "prbs7", "ascii_hello"] = "alternating"
     laserPower_mW: float = Field(10.0, gt=0.0, le=100000.0)
     receiverDiamM: float = Field(0.10, gt=0.0, le=100.0)
     beamDivRad: float = Field(0.001, ge=0.0, le=1.0)
     receiverSensitivity_dBm: float = Field(-40.0, ge=-200.0, le=100.0)
+
+    @model_validator(mode="after")
+    def validate_grid(self):
+        validate_grid_limits(self.gridX, self.gridY, self.gridZ, self.cellSize)
+        return self
 
 
 # ── Serialization Helpers ─────────────────────────────────────
@@ -81,10 +109,10 @@ def coerce_numpy(obj):
         return tuple(coerce_numpy(x) for x in obj)
     elif isinstance(obj, (np.floating, float)):
         return float(obj)
-    elif isinstance(obj, (np.integer, int)):
-        return int(obj)
     elif isinstance(obj, (np.bool_, bool)):
         return bool(obj)
+    elif isinstance(obj, (np.integer, int)):
+        return int(obj)
     else:
         return obj
 
@@ -149,7 +177,7 @@ def run_simulation_backend(p: SimParams):
     base_temp = p.baseTemp
     delta_t = p.deltaT
     wind_speed = p.windSpeed
-    humidity = 50.0
+    humidity = p.humidity
 
     if p.environmentPreset:
         preset = EnvironmentPresets.get_preset(p.environmentPreset)
@@ -174,8 +202,8 @@ def run_simulation_backend(p: SimParams):
 
     rayTracer = RayTracer(atmosphere)
 
-    sourcePos = Vec3(0.5 * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5)
-    targetPos = Vec3((p.gridX - 0.5) * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5)
+    sourcePos = Vec3(0.0, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5)
+    targetPos = Vec3(p.gridX * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5)
 
     # Apply lens system
     lens = LensSystem(p.lensType, p.lensFocalLength_m, p.lensAperture_m)
@@ -199,6 +227,7 @@ def run_simulation_backend(p: SimParams):
         "receiverDiamM": lensed_beam["receiverDiamM"],
         "beamDiamM": 0.004,
         "Cn2": trace["avgCn2"] if trace["avgCn2"] > 0 else 1e-15,
+        "pointingErrorRad": p.pointingErrorRad,
         "receiverSensitivity_dBm": p.receiverSensitivity_dBm
     })
     # Apply lens transmittance power penalty
@@ -252,8 +281,8 @@ def simulate(p: SimParams):
             "receiverRadius": recvR
         }
         return coerce_numpy(res)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error
 
 @app.post("/api/send-data")
 def send_data(params: SendDataParams):
@@ -295,15 +324,16 @@ def send_data(params: SendDataParams):
             "totalOnes": results["totalOnes"],
             "totalZeros": results["totalZeros"],
             "missedOnes": results["missedOnes"],
+            "missedZeros": results["missedZeros"],
             "successRate": results["successRate"]
         }
         return coerce_numpy(res)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error
 
 @app.post("/api/test")
 def run_tests():
-    # Runs the 11 unit tests matching JS unit tests
+    # Lightweight API smoke checks; pytest remains the authoritative test suite.
     test_results = []
     
     # Test 1: Normal incidence
@@ -537,8 +567,8 @@ def test_transmission(params: TransmissionTestParams):
             },
             "byEnvironment": by_env
         })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error
 
 
 @app.get("/api/presets")
@@ -557,8 +587,8 @@ def export_csv_grid(p: SimParams):
         bridge = COMSOLBridge()
         csv_content = bridge.exportGridCSV(atmosphere)
         return {"filename": "atmosphere_grid.csv", "content": csv_content, "mimeType": "text/csv"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error
 
 @app.post("/api/export/csv-raypath")
 def export_csv_raypath(p: SimParams):
@@ -567,8 +597,8 @@ def export_csv_raypath(p: SimParams):
         bridge = COMSOLBridge()
         csv_content = bridge.exportRayPathCSV(trace)
         return {"filename": "ray_path.csv", "content": csv_content, "mimeType": "text/csv"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error
 
 @app.post("/api/export/comsol-java")
 def export_comsol_java(p: SimParams):
@@ -584,8 +614,8 @@ def export_comsol_java(p: SimParams):
             "deltaT": p.deltaT
         })
         return {"filename": "FSO_AtmosphericChannel.java", "content": script, "mimeType": "text/x-java-source"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error
 
 @app.post("/api/export/comsol-matlab")
 def export_comsol_matlab(p: SimParams):
@@ -598,8 +628,8 @@ def export_comsol_matlab(p: SimParams):
             "baseTemp": p.baseTemp
         })
         return {"filename": "FSO_COMSOL_LiveLink.m", "content": script, "mimeType": "text/x-matlab"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error
 
 @app.post("/api/export/comsol-params")
 def export_comsol_params(p: SimParams):
@@ -615,5 +645,5 @@ def export_comsol_params(p: SimParams):
             "deltaT": p.deltaT
         })
         return {"filename": "comsol_parameters.txt", "content": params_txt, "mimeType": "text/plain"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise internal_server_error(error) from error

@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from backend.engine import AtmosphereGrid, AtmosphericLoss
+from backend.engine import AtmosphereGrid, AtmosphericLoss, RayTracer, Vec3
 
 
 def test_beer_lambert_clear_air_loss_at_six_kilometres():
@@ -55,3 +55,21 @@ def test_each_environment_preset_builds_an_atmosphere_grid():
             "useEdlen": True,
         })
         assert len(atmosphere.grid) == 8 * 4 * 4
+
+
+def test_path_average_cn2_includes_every_traversed_segment():
+    atmosphere = AtmosphereGrid(4, 2, 2, 100.0)
+    atmosphere.Cn2.fill(2e-15)
+
+    trace = RayTracer(atmosphere).trace(Vec3(0.0, 100.0, 100.0), Vec3(1.0, 0.0, 0.0))
+
+    assert trace["avgCn2"] == pytest.approx(2e-15, rel=1e-12)
+
+
+def test_randomized_humidity_stays_in_physical_range():
+    atmosphere = AtmosphereGrid(4, 2, 2, 100.0)
+
+    for humidity in (0.0, 100.0):
+        atmosphere.applyThermalProfile("uniform", {"humidity": humidity, "seed": 42})
+        assert atmosphere.humidity.min() >= 0.0
+        assert atmosphere.humidity.max() <= 100.0

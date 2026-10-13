@@ -25,8 +25,8 @@ def test_gradient_trace_matches_deterministic_fixture():
             "seed": config["seed"],
         },
     )
-    source = Vec3(50.0, 200.0, 200.0)
-    target = Vec3(750.0, 200.0, 200.0)
+    source = Vec3(0.0, 200.0, 200.0)
+    target = Vec3(800.0, 200.0, 200.0)
     trace = RayTracer(atmosphere).trace(source, target.sub(source).normalize())
     expected_trace = expected["trace"]
 

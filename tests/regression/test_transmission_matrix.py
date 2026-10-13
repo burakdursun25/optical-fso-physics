@@ -44,3 +44,20 @@ def test_industrial_conditions_do_not_beat_mountain_by_large_margin():
         industrial = by_env_lens[("industrial", lens_key)]
         mountain = by_env_lens[("mountain", lens_key)]
         assert industrial <= mountain + 10.0
+
+
+def test_all_zero_packets_fail_when_every_link_is_below_sensitivity():
+    results = ComprehensiveTransmissionTest.run_all({
+        "gridX": 6,
+        "gridY": 2,
+        "gridZ": 2,
+        "cellSize": 1000.0,
+        "numBits": 4,
+        "pattern": "all_zeros",
+        "laserPower_mW": 1e-6,
+        "receiverDiamM": 0.02,
+        "beamDivRad": 0.005,
+    })
+
+    assert all(not result["linkViable"] for result in results)
+    assert all(result["correctBits"] == 0 and result["successRate"] == 0.0 for result in results)

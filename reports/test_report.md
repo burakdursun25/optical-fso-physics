@@ -1,18 +1,18 @@
 # Automated Physics Test Report
 
 - **Status:** PASSED
-- **Generated:** 2026-10-12T13:19:39.708686+00:00
-- **Total:** 24
-- **Passed:** 24
+- **Generated:** 2026-10-13T15:40:12.371674+00:00
+- **Total:** 39
+- **Passed:** 39
 - **Failed:** 0
 - **Errors:** 0
 - **Skipped:** 0
-- **Duration:** 0.227s
+- **Duration:** 0.475s
 
 ## Scope
 
-The suite is headless and validates the Python physics engine without launching the UI.
-Unit tests cover mathematical and physical primitives; regression tests compare deterministic ray-trace output with a checked-in JSON fixture.
+The headless suite covers physics primitives, API validation/serialization, and COMSOL export data.
+Regression tests cover transmission matrices and deterministic ray traces; browser UI and licensed COMSOL solver execution are separate checks.
 
 ## Artifacts
 

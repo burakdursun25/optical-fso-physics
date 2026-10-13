@@ -347,7 +347,7 @@ class AtmosphereGrid {
                     this.temperature[idx] = temp;
                     const P = this.pressureAtAltitude(altitude);
                     this.pressure[idx] = P;
-                    this.humidity[idx] = humidity + (rand() - 0.5) * 10;
+                    this.humidity[idx] = Math.max(0, Math.min(100, humidity + (rand() - 0.5) * 10));
 
                     // Calculate refractive index
                     if (useEdlen) {
@@ -472,7 +472,12 @@ class AtmosphericLoss {
         if (weather === 'haze' || weather === 'fog') {
             // V = visibility in km
             const V = weather === 'fog' ? 0.5 : 4.0;
-            const q = wavelengthNm > 500 ? 1.6 : (V > 6 ? 1.3 : (V > 1 ? 0.585 * Math.pow(V, 1 / 3) : 0));
+            let q;
+            if (wavelengthNm > 500) {
+                q = V > 6 ? 1.3 : (V > 1 ? 0.585 * Math.pow(V, 1 / 3) : 0);
+            } else {
+                q = 1.6;
+            }
             alpha_dB_km = 3.91 / V * Math.pow(550 / wavelengthNm, q);
         } else if (weather === 'storm') {
             // Kombine: yoğun sis (V≈0.1km) + şiddetli yağmur + kar
@@ -503,15 +508,22 @@ class AtmosphericLoss {
      * For a Gaussian beam: L_geo = (D_receiver / D_beam(L))²
      * D_beam(L) = D0 + θ_div × L
      */
-    static geometricLoss(distance_m, beamDivergenceRad = 1e-3, receiverDiameterM = 0.1, beamDiameterM = 0.004) {
+    static geometricLoss(distance_m, beamDivergenceRad = 1e-3, receiverDiameterM = 0.1, beamDiameterM = 0.004, pointingErrorRad = 0) {
         const beamDiamAtReceiver = beamDiameterM + 2 * beamDivergenceRad * distance_m;
         const ratio = receiverDiameterM / beamDiamAtReceiver;
         const capturedFraction = Math.min(1, ratio * ratio);
-        const loss_dB = -10 * Math.log10(capturedFraction);
+        const pointingOffsetM = distance_m * Math.tan(Math.max(0, pointingErrorRad));
+        const beamRadiusM = beamDiamAtReceiver / 2;
+        const pointingCoupling = Math.exp(-2 * Math.pow(pointingOffsetM / Math.max(1e-12, beamRadiusM), 2));
+        const effectiveCapturedFraction = capturedFraction * pointingCoupling;
+        const loss_dB = -10 * Math.log10(Math.max(1e-300, effectiveCapturedFraction));
 
         return {
             beamDiamAtReceiver,
             capturedFraction,
+            pointingOffsetM,
+            pointingCoupling,
+            effectiveCapturedFraction,
             loss_dB,
             beamSpreadArea: Math.PI * (beamDiamAtReceiver / 2) * (beamDiamAtReceiver / 2)
         };
@@ -556,13 +568,14 @@ class AtmosphericLoss {
             beamDivRad = 1e-3,
             receiverDiamM = 0.1,
             beamDiamM = 0.004,
+            pointingErrorRad = 0,
             Cn2 = 1e-15,
             receiverSensitivity_dBm = -40
         } = params;
 
         const P_tx_dBm = 10 * Math.log10(laserPower_W * 1000);
         const absorption = this.absorptionLoss(distance_m, weather, wavelengthNm);
-        const geometric = this.geometricLoss(distance_m, beamDivRad, receiverDiamM, beamDiamM);
+        const geometric = this.geometricLoss(distance_m, beamDivRad, receiverDiamM, beamDiamM, pointingErrorRad);
         const scintillation = this.scintillationIndex(distance_m, Cn2, wavelengthNm * 1e-9);
 
         // Scintillation-induced power penalty (dB)
@@ -636,6 +649,7 @@ class RayTracer {
 
             const newPos = pos.add(dir.scale(boundary.t));
             totalDistance += boundary.t;
+            accumulatedCn2 += atm.getCn2(cell.ix, cell.iy, cell.iz) * boundary.t;
 
             const nextCell = {
                 ix: cell.ix + boundary.stepX,
@@ -652,9 +666,6 @@ class RayTracer {
             }
 
             const nextN = atm.getRefractiveIndex(nextCell.ix, nextCell.iy, nextCell.iz);
-
-            // Accumulate Cn² along path
-            accumulatedCn2 += atm.getCn2(nextCell.ix, nextCell.iy, nextCell.iz) * boundary.t;
 
             if (Math.abs(nextN - currentN) > 1e-15) {
                 const result = vectorialSnellLaw(dir, boundary.normal, currentN, nextN);
@@ -769,67 +780,81 @@ class RayTracer {
 
 // ── Data Transmission Simulator (6 km) ───────────────────────
 class DataTransmissionSimulator {
-    constructor(rayTracer, sourcePos, targetPos, receiverRadius = 0.5) {
+    constructor(rayTracer, sourcePos, targetPos, receiverRadius = 0.5, linkBudgetParams = {}) {
         this.rayTracer = rayTracer;
         this.sourcePos = sourcePos;
         this.targetPos = targetPos;
         this.receiverRadius = receiverRadius;
         this.beamDivergence = 0.001;
+        this.linkBudgetParams = linkBudgetParams;
+        this.cachedTrace = null;
+        this.cachedLinkBudget = null;
+    }
+
+    _getTransmissionState() {
+        if (!this.cachedTrace) {
+            const dir = this.targetPos.sub(this.sourcePos).normalize();
+            this.cachedTrace = this.rayTracer.trace(this.sourcePos, dir);
+            const distance = this.sourcePos.sub(this.targetPos).length();
+            const { transmittance = 1, ...linkParams } = this.linkBudgetParams;
+            this.cachedLinkBudget = AtmosphericLoss.linkBudget({
+                distance_m: distance,
+                Cn2: this.cachedTrace.avgCn2 || 1e-15,
+                ...linkParams
+            });
+            this.cachedLinkBudget.P_rx_dBm += 10 * Math.log10(Math.max(1e-300, transmittance));
+            this.cachedLinkBudget.P_rx_W = Math.pow(10, this.cachedLinkBudget.P_rx_dBm / 10) / 1000;
+            this.cachedLinkBudget.linkMargin_dB = this.cachedLinkBudget.P_rx_dBm - (linkParams.receiverSensitivity_dBm ?? -40);
+            this.cachedLinkBudget.linkViable = this.cachedLinkBudget.linkMargin_dB > 0;
+        }
+        return { trace: this.cachedTrace, linkBudget: this.cachedLinkBudget };
     }
 
     sendBit(bit) {
-        if (bit === 0) {
-            return { sent: 0, received: 0, correct: true, trace: null, signalPower: 0 };
-        }
-
-        const dir = this.targetPos.sub(this.sourcePos).normalize();
-        const trace = this.rayTracer.trace(this.sourcePos, dir);
-        const distance = this.sourcePos.sub(this.targetPos).length();
-
-        // Calculate atmospheric losses
-        const linkBudget = AtmosphericLoss.linkBudget({
-            distance_m: distance,
-            Cn2: trace.avgCn2 || 1e-15
-        });
-
-        let received = 0;
-        let lateralDeviation = Infinity;
+        if (bit !== 0 && bit !== 1) throw new RangeError('bit must be 0 or 1');
+        const { trace, linkBudget } = this._getTransmissionState();
+        let lateralDeviation = null;
         if (trace.exitPosition) {
             lateralDeviation = Math.sqrt(
                 Math.pow(trace.exitPosition.y - this.targetPos.y, 2) +
                 Math.pow(trace.exitPosition.z - this.targetPos.z, 2)
             );
-            if (lateralDeviation <= this.receiverRadius && linkBudget.linkViable) {
-                received = 1;
-            }
         }
+        const channelAvailable = Boolean(
+            trace.success && lateralDeviation !== null &&
+            lateralDeviation <= this.receiverRadius && linkBudget.linkViable
+        );
+        const received = channelAvailable ? bit : 0;
 
         return {
-            sent: 1, received, correct: received === 1,
+            sent: bit, received, correct: channelAvailable && received === bit,
             trace, lateralDeviation,
-            signalPower: linkBudget.P_rx_dBm,
+            signalPower: bit ? linkBudget.P_rx_dBm : 0,
             linkBudget
         };
     }
 
     sendPacket(data) {
         const results = [];
-        let correctBits = 0, totalOnes = 0, totalZeros = 0, missedOnes = 0;
+        let correctBits = 0, totalOnes = 0, totalZeros = 0, missedOnes = 0, missedZeros = 0;
 
         for (let i = 0; i < data.length; i++) {
             const result = this.sendBit(data[i]);
             results.push(result);
             if (result.correct) correctBits++;
             if (data[i] === 1) { totalOnes++; if (!result.correct) missedOnes++; }
-            else totalZeros++;
+            else {
+                totalZeros++;
+                if (!result.correct) missedZeros++;
+            }
         }
 
         return {
             data, results,
             totalBits: data.length, correctBits,
-            bitErrorRate: 1 - (correctBits / data.length),
-            totalOnes, totalZeros, missedOnes,
-            successRate: (correctBits / data.length) * 100
+            bitErrorRate: data.length ? 1 - (correctBits / data.length) : 0,
+            totalOnes, totalZeros, missedOnes, missedZeros,
+            successRate: data.length ? (correctBits / data.length) * 100 : 0
         };
     }
 
@@ -1160,8 +1185,8 @@ class ComprehensiveTransmissionTest {
             });
 
             const rayTracer = new RayTracer(atmosphere);
-            const sourcePos = new Vec3(0.5 * cellSize, gridY * cellSize * 0.5, gridZ * cellSize * 0.5);
-            const targetPos = new Vec3((gridX - 0.5) * cellSize, gridY * cellSize * 0.5, gridZ * cellSize * 0.5);
+            const sourcePos = new Vec3(0, gridY * cellSize * 0.5, gridZ * cellSize * 0.5);
+            const targetPos = new Vec3(gridX * cellSize, gridY * cellSize * 0.5, gridZ * cellSize * 0.5);
 
             for (const lensKey of lensTypes) {
                 const lens = new LensSystem(lensKey);
@@ -1172,41 +1197,32 @@ class ComprehensiveTransmissionTest {
                 });
                 const effectiveRecvR = lensedBeam.receiverDiamM / 2;
 
-                const simulator = new DataTransmissionSimulator(rayTracer, sourcePos, targetPos, effectiveRecvR);
-
                 // Generate test data
                 const data = DataTransmissionSimulator.generateTestData(pattern, numBits);
                 const distance = sourcePos.sub(targetPos).length();
 
-                let correctBits = 0;
-                for (const bit of data) {
-                    if (bit === 0) { correctBits++; continue; }
-                    const dir = targetPos.sub(sourcePos).normalize();
-                    const trace = rayTracer.trace(sourcePos, dir);
-                    const linkBudget = AtmosphericLoss.linkBudget({
-                        distance_m: distance,
-                        laserPower_W: laserPower_mW / 1000,
-                        weather: envPreset.weather,
-                        wavelengthNm,
-                        beamDivRad: lensedBeam.divergenceRad,
-                        receiverDiamM: lensedBeam.receiverDiamM,
-                        beamDiamM: 0.004,
-                        Cn2: trace.avgCn2 || 1e-15
-                    });
-                    // Apply lens transmittance power penalty
-                    const effectivePrx = linkBudget.P_rx_dBm + 10 * Math.log10(lensedBeam.transmittance);
-                    const effectiveLinkViable = effectivePrx > -40; // receiver sensitivity
-
-                    let received = 0;
-                    if (trace.exitPosition) {
-                        const latDev = Math.sqrt(
-                            Math.pow(trace.exitPosition.y - targetPos.y, 2) +
-                            Math.pow(trace.exitPosition.z - targetPos.z, 2)
-                        );
-                        if (latDev <= effectiveRecvR && effectiveLinkViable) received = 1;
-                    }
-                    if (received === 1) correctBits++;
-                }
+                const dir = targetPos.sub(sourcePos).normalize();
+                const trace = rayTracer.trace(sourcePos, dir);
+                const linkBudget = AtmosphericLoss.linkBudget({
+                    distance_m: distance,
+                    laserPower_W: laserPower_mW / 1000,
+                    weather: envPreset.weather,
+                    wavelengthNm,
+                    beamDivRad: lensedBeam.divergenceRad,
+                    receiverDiamM: lensedBeam.receiverDiamM,
+                    beamDiamM: 0.004,
+                    Cn2: trace.avgCn2 || 1e-15
+                });
+                const effectivePrx = linkBudget.P_rx_dBm + 10 * Math.log10(lensedBeam.transmittance);
+                const effectiveLinkViable = effectivePrx > -40;
+                const lateralDeviation = trace.exitPosition
+                    ? Math.hypot(trace.exitPosition.y - targetPos.y, trace.exitPosition.z - targetPos.z)
+                    : null;
+                const channelAvailable = Boolean(
+                    trace.success && lateralDeviation !== null &&
+                    lateralDeviation <= effectiveRecvR && effectiveLinkViable
+                );
+                const correctBits = channelAvailable ? data.length : 0;
 
                 const successRate = (correctBits / numBits) * 100;
                 const lensGain = lens.getLinkBudgetGain_dB(distance, beamDivRad, receiverDiamM, 0.004);

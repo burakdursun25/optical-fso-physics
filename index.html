@@ -109,6 +109,13 @@
                 </div>
 
                 <div class="control-group">
+                    <div class="control-label">
+                        Bağıl Nem <span class="control-value" id="humidity-val">50%</span>
+                    </div>
+                    <input type="range" id="humidity" min="0" max="100" value="50" step="1">
+                </div>
+
+                <div class="control-group">
                     <div class="control-label">Hava Koşulu</div>
                     <select id="weather-condition">
                         <option value="clear" selected>Açık (Visibility >10km)</option>
@@ -170,6 +177,13 @@
                         Işın Diverjansı <span class="control-value" id="beam-div-val">1.0 mrad</span>
                     </div>
                     <input type="range" id="beam-div" min="0.1" max="5.0" value="1.0" step="0.1">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-label">
+                        Pointing Hatası <span class="control-value" id="pointing-error-val">0 µrad</span>
+                    </div>
+                    <input type="range" id="pointing-error" min="0" max="1000" value="0" step="10">
                 </div>
             </div>
 
@@ -239,6 +253,7 @@
                     <select id="data-pattern">
                         <option value="alternating">Değişen (01010101)</option>
                         <option value="all_ones">Tüm Birler</option>
+                        <option value="all_zeros">Tüm Sıfırlar</option>
                         <option value="random" selected>Rastgele</option>
                         <option value="burst">Burst (8'li)</option>
                         <option value="prbs7">PRBS-7</option>
@@ -312,7 +327,7 @@
         <main class="main-content">
 
             <!-- Link Budget Summary -->
-            <div class="results-grid animate-in" style="grid-template-columns: repeat(4, 1fr);">
+            <div class="results-grid result-summary-grid animate-in">
                 <div class="result-card">
                     <div class="result-label">LINK BÜTÇESİ</div>
                     <div class="result-value emerald" id="result-link-margin">—</div>
@@ -370,7 +385,7 @@
             </div>
 
             <!-- Canvas Views -->
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;" class="animate-in-delayed">
+            <div class="canvas-grid animate-in-delayed">
                 <div class="canvas-container">
                     <div class="canvas-header">
                         <div class="canvas-title">
@@ -470,7 +485,7 @@
                     </div>
 
                     <!-- Summary cards -->
-                    <div id="test-summary-cards" style="display:none; grid-template-columns: repeat(3,1fr); gap:8px; margin-bottom:14px;" class="results-grid">
+                    <div id="test-summary-cards" style="display:none;" class="results-grid test-summary-grid">
                         <div class="result-card">
                             <div class="result-label">ORTALAMA BAŞARI</div>
                             <div class="result-value emerald" id="test-avg-rate">—</div>

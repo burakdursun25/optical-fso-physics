@@ -308,7 +308,7 @@ class AtmosphereGrid:
                     self.temperature[idx] = temp
                     P = self.pressureAtAltitude(altitude)
                     self.pressure[idx] = P
-                    self.humidity[idx] = humidity_val + (rand() - 0.5) * 10.0
+                    self.humidity[idx] = min(100.0, max(0.0, humidity_val + (rand() - 0.5) * 10.0))
 
                     if useEdlen:
                         self.grid[idx] = self.refractiveIndexEdlen(temp, P, self.humidity[idx], wavelengthUm)
@@ -578,6 +578,7 @@ class RayTracer:
 
             newPos = pos.add(dir.scale(boundary["t"]))
             totalDistance += boundary["t"]
+            accumulatedCn2 += atm.getCn2(cell["ix"], cell["iy"], cell["iz"]) * boundary["t"]
 
             nextCell = {
                 "ix": cell["ix"] + boundary["stepX"],
@@ -596,7 +597,6 @@ class RayTracer:
                 break
 
             nextN = atm.getRefractiveIndex(nextCell["ix"], nextCell["iy"], nextCell["iz"])
-            accumulatedCn2 += atm.getCn2(nextCell["ix"], nextCell["iy"], nextCell["iz"]) * boundary["t"]
 
             if abs(nextN - currentN) > 1e-15:
                 result = vectorialSnellLaw(dir, boundary["normal"], currentN, nextN)
@@ -742,36 +742,32 @@ class DataTransmissionSimulator:
         return self._cachedTrace, self._cachedLinkBudget
 
     def sendBit(self, bit):
-        if bit == 0:
-            return {
-                "sent": 0,
-                "received": 0,
-                "correct": True,
-                "trace": None,
-                "signalPower": 0.0,
-                "lateralDeviation": float("inf")
-            }
-
+        if bit not in (0, 1):
+            raise ValueError("bit must be 0 or 1")
         trace, linkBudget = self._getTransmissionState()
 
-        received = 0
-        lateralDeviation = float("inf")
-        if trace["exitPosition"]:
+        lateralDeviation = None
+        if trace.get("exitPosition"):
             exit_pos = trace["exitPosition"]
             lateralDeviation = math.sqrt(
                 math.pow(exit_pos.y - self.targetPos.y, 2.0) +
                 math.pow(exit_pos.z - self.targetPos.z, 2.0)
             )
-            if lateralDeviation <= self.receiverRadius and linkBudget["linkViable"]:
-                received = 1
+        channelAvailable = (
+            trace.get("success", False)
+            and lateralDeviation is not None
+            and lateralDeviation <= self.receiverRadius
+            and linkBudget.get("linkViable", False)
+        )
+        received = bit if channelAvailable else 0
 
         return {
-            "sent": 1,
+            "sent": bit,
             "received": received,
-            "correct": received == 1,
+            "correct": channelAvailable and received == bit,
             "trace": trace,
             "lateralDeviation": lateralDeviation,
-            "signalPower": linkBudget["P_rx_dBm"],
+            "signalPower": linkBudget.get("P_rx_dBm", 0.0) if bit else 0.0,
             "linkBudget": linkBudget
         }
 
@@ -781,6 +777,7 @@ class DataTransmissionSimulator:
         totalOnes = 0
         totalZeros = 0
         missedOnes = 0
+        missedZeros = 0
 
         for bit in data:
             result = self.sendBit(bit)
@@ -793,6 +790,8 @@ class DataTransmissionSimulator:
                     missedOnes += 1
             else:
                 totalZeros += 1
+                if not result["correct"]:
+                    missedZeros += 1
 
         bit_error_rate = 1.0 - (correctBits / len(data)) if len(data) > 0 else 0.0
         success_rate = (correctBits / len(data)) * 100.0 if len(data) > 0 else 0.0
@@ -806,6 +805,7 @@ class DataTransmissionSimulator:
             "totalOnes": totalOnes,
             "totalZeros": totalZeros,
             "missedOnes": missedOnes,
+            "missedZeros": missedZeros,
             "successRate": success_rate
         }
 
@@ -1096,8 +1096,8 @@ class ComprehensiveTransmissionTest:
             })
 
             ray_tracer = RayTracer(atmosphere)
-            source_pos = Vec3(0.5 * cell_size, grid_y * cell_size * 0.5, grid_z * cell_size * 0.5)
-            target_pos = Vec3((grid_x - 0.5) * cell_size, grid_y * cell_size * 0.5, grid_z * cell_size * 0.5)
+            source_pos = Vec3(0.0, grid_y * cell_size * 0.5, grid_z * cell_size * 0.5)
+            target_pos = Vec3(grid_x * cell_size, grid_y * cell_size * 0.5, grid_z * cell_size * 0.5)
             distance = source_pos.sub(target_pos).length()
 
             # Pre-compute one trace (ray path doesn't change per lens)
@@ -1132,22 +1132,18 @@ class ComprehensiveTransmissionTest:
                 effective_prx = link_budget["P_rx_dBm"] + 10.0 * math.log10(max(1e-300, lensed_beam["transmittance"]))
                 effective_link_viable = effective_prx > receiver_sensitivity_dBm
 
-                correct_bits = 0
-                for bit in data:
-                    if bit == 0:
-                        correct_bits += 1
-                        continue
-                    received = 0
-                    if trace["exitPosition"]:
-                        exit_pos = trace["exitPosition"]
-                        lat_dev = math.sqrt(
-                            math.pow(exit_pos.y - target_pos.y, 2.0) +
-                            math.pow(exit_pos.z - target_pos.z, 2.0)
-                        )
-                        if lat_dev <= effective_recv_r and effective_link_viable:
-                            received = 1
-                    if received == 1:
-                        correct_bits += 1
+                exit_pos = trace["exitPosition"]
+                lateral_deviation = (
+                    math.hypot(exit_pos.y - target_pos.y, exit_pos.z - target_pos.z)
+                    if exit_pos is not None else None
+                )
+                channel_available = (
+                    trace["success"]
+                    and lateral_deviation is not None
+                    and lateral_deviation <= effective_recv_r
+                    and effective_link_viable
+                )
+                correct_bits = len(data) if channel_available else 0
 
                 success_rate = (correct_bits / num_bits) * 100.0 if num_bits > 0 else 0.0
                 lens_gain = lens.get_link_budget_gain_dB(distance, beam_div_rad, receiver_diam_m, 0.004)

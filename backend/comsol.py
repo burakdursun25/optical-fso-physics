@@ -1,5 +1,4 @@
 import datetime
-import math
 
 class COMSOLBridge:
     def __init__(self):
@@ -29,7 +28,7 @@ class COMSOLBridge:
                     idx = atm.index(ix, iy, iz)
                     n = atm.grid[idx]
                     T = atm.temperature[idx]
-                    P = 101325.0 * math.exp(-0.0001184 * z)
+                    P = atm.pressure[idx]
                     csv_lines.append(f"{x:.2f}, {y:.2f}, {z:.2f}, {n:.10f}, {T:.2f}, {P:.1f}")
 
         return "\n".join(csv_lines) + "\n"

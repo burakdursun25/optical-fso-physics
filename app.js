@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const thermalSelect     = document.getElementById('thermal-profile');
     const baseTempSlider    = document.getElementById('base-temp');
     const deltaTSlider      = document.getElementById('delta-t');
+    const humiditySlider    = document.getElementById('humidity');
     const weatherSelect     = document.getElementById('weather-condition');
     const cn2Select         = document.getElementById('cn2-level');
     const windSpeedSlider   = document.getElementById('wind-speed');
@@ -31,6 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const laserPowerSlider  = document.getElementById('laser-power');
     const receiverDiamSlider= document.getElementById('receiver-diameter');
     const beamDivSlider     = document.getElementById('beam-div');
+    const pointingErrorSlider = document.getElementById('pointing-error');
     const dataPatternSelect = document.getElementById('data-pattern');
     const dataBitsSlider    = document.getElementById('data-bits');
 
@@ -40,11 +42,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const cellSizeVal    = document.getElementById('cell-size-val');
     const baseTempVal    = document.getElementById('base-temp-val');
     const deltaTVal      = document.getElementById('delta-t-val');
+    const humidityVal    = document.getElementById('humidity-val');
     const windSpeedVal   = document.getElementById('wind-speed-val');
     const wavelengthVal  = document.getElementById('wavelength-val');
     const laserPowerVal  = document.getElementById('laser-power-val');
     const receiverDiamVal= document.getElementById('receiver-diameter-val');
     const beamDivVal     = document.getElementById('beam-div-val');
+    const pointingErrorVal = document.getElementById('pointing-error-val');
     const dataBitsVal    = document.getElementById('data-bits-val');
     const totalDistVal   = document.getElementById('total-distance-val');
 
@@ -100,7 +104,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentTargetPos = null;
     let animFrameId = null;
     let usePythonBackend = false;
-    const BACKEND_URL = 'http://localhost:8000';
+    const BACKEND_URL = window.location.protocol === 'file:'
+        ? 'http://localhost:8000'
+        : window.location.origin;
 
     comsolBridge = new COMSOLBridge();
 
@@ -164,11 +170,13 @@ document.addEventListener('DOMContentLoaded', () => {
     bindSlider(cellSizeSlider, cellSizeVal, 'm');
     bindSlider(baseTempSlider, baseTempVal, '°C');
     bindSlider(deltaTSlider, deltaTVal, '°C');
+    bindSlider(humiditySlider, humidityVal, '%');
     bindSlider(windSpeedSlider, windSpeedVal, ' m/s');
     bindSlider(wavelengthSlider, wavelengthVal, ' nm');
     bindSlider(laserPowerSlider, laserPowerVal, ' mW');
     bindSlider(receiverDiamSlider, receiverDiamVal, ' m');
     bindSlider(beamDivSlider, beamDivVal, ' mrad');
+    bindSlider(pointingErrorSlider, pointingErrorVal, ' µrad');
     bindSlider(dataBitsSlider, dataBitsVal, ' bit');
 
     function updateTotalDistance() {
@@ -188,6 +196,7 @@ document.addEventListener('DOMContentLoaded', () => {
             thermalProfile: thermalSelect.value,
             baseTemp: parseFloat(baseTempSlider.value),
             deltaT: parseFloat(deltaTSlider.value),
+            humidity: parseFloat(humiditySlider.value),
             weather: weatherSelect.value,
             Cn2Level: cn2Select.value,
             windSpeed: parseFloat(windSpeedSlider.value),
@@ -197,9 +206,32 @@ document.addEventListener('DOMContentLoaded', () => {
             laserPower_W: parseFloat(laserPowerSlider.value) / 1000,
             receiverDiamM: parseFloat(receiverDiamSlider.value),
             receiverSensitivity_dBm: -40,
-            pointingErrorRad: 0,
+            pointingErrorRad: parseFloat(pointingErrorSlider.value) / 1000000,
             beamDivRad: parseFloat(beamDivSlider.value) / 1000,
             lensType: lensTypeEl ? lensTypeEl.value : 'none',
+        };
+    }
+
+    function getLensAdjustedBeam(p) {
+        return new LensSystem(p.lensType).applyToBeam({
+            divergenceRad: p.beamDivRad,
+            beamDiamM: 0.004,
+            receiverDiamM: p.receiverDiamM
+        });
+    }
+
+    function getLinkBudgetParams(p) {
+        const beam = getLensAdjustedBeam(p);
+        return {
+            laserPower_W: p.laserPower_W,
+            weather: p.weather,
+            wavelengthNm: p.wavelengthNm,
+            beamDivRad: beam.divergenceRad,
+            receiverDiamM: beam.receiverDiamM,
+            beamDiamM: beam.beamDiamM,
+            pointingErrorRad: p.pointingErrorRad,
+            receiverSensitivity_dBm: p.receiverSensitivity_dBm,
+            transmittance: beam.transmittance
         };
     }
 
@@ -249,6 +281,8 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('base-temp-val').textContent = preset.baseTemp + '°C';
             document.getElementById('delta-t').value = preset.deltaT;
             document.getElementById('delta-t-val').textContent = preset.deltaT + '°C';
+            humiditySlider.value = preset.humidity;
+            humidityVal.textContent = preset.humidity + '%';
             weatherSelect.value = preset.weather;
             cn2Select.value = preset.Cn2Level;
             document.getElementById('wind-speed').value = preset.windSpeed;
@@ -389,13 +423,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── Initialize System ─────────────────────────────────────
     function initSystem() {
         const p = getParams();
+        const beam = getLensAdjustedBeam(p);
 
         atmosphere = new AtmosphereGrid(p.gridX, p.gridY, p.gridZ, p.cellSize);
         atmosphere.applyThermalProfile(p.thermalProfile, {
             baseTemp: p.baseTemp,
             deltaT: p.deltaT,
-            seed: Math.floor(Math.random() * 100000),
-            humidity: 50,
+            seed: 42,
+            humidity: p.humidity,
             windSpeed: p.windSpeed,
             Cn2Level: p.Cn2Level,
             wavelengthUm: p.wavelengthUm,
@@ -404,14 +439,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         rayTracer = new RayTracer(atmosphere);
 
-        const sourcePos = new Vec3(0.5 * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5);
-        const targetPos = new Vec3((p.gridX - 0.5) * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5);
-        const recvR = p.receiverDiamM / 2;
+        const sourcePos = new Vec3(0, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5);
+        const targetPos = new Vec3(p.gridX * p.cellSize, p.gridY * p.cellSize * 0.5, p.gridZ * p.cellSize * 0.5);
+        const recvR = beam.receiverDiamM / 2;
 
         currentSourcePos = sourcePos;
         currentTargetPos = targetPos;
 
-        transmitter = new DataTransmissionSimulator(rayTracer, sourcePos, targetPos, recvR);
+        transmitter = new DataTransmissionSimulator(rayTracer, sourcePos, targetPos, recvR, getLinkBudgetParams(p));
 
         if (!renderer) {
             renderer = new FSORenderer(topCanvas, sideCanvas);
@@ -428,16 +463,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ── Update Link Budget Display ────────────────────────────
     function updateLinkBudget(p, distance_m, avgCn2) {
+        const { transmittance, ...linkParams } = getLinkBudgetParams(p);
         const lb = AtmosphericLoss.linkBudget({
             distance_m,
-            laserPower_W: p.laserPower_W,
-            weather: p.weather,
-            wavelengthNm: p.wavelengthNm,
-            beamDivRad: p.beamDivRad,
-            receiverDiamM: p.receiverDiamM,
-            beamDiamM: 0.004,
-            Cn2: avgCn2 || 1e-15
+            Cn2: avgCn2 || 1e-15,
+            ...linkParams
         });
+        lb.P_rx_dBm += 10 * Math.log10(Math.max(1e-300, transmittance));
+        lb.P_rx_W = Math.pow(10, lb.P_rx_dBm / 10) / 1000;
+        lb.linkMargin_dB = lb.P_rx_dBm - p.receiverSensitivity_dBm;
+        lb.linkViable = lb.linkMargin_dB > 0;
 
         // Link Margin
         resultLinkMargin.textContent = `${lb.linkMargin_dB.toFixed(1)} dB`;
@@ -633,6 +668,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const res = await fetch(`${BACKEND_URL}/api/test`, { method: 'POST' });
                 if (!res.ok) throw new Error(await res.text());
                 const data = await res.json();
+                const passedCount = data.results.filter(test => test.pass).length;
+                const totalCount = data.results.length;
                 
                 data.results.forEach(t => {
                     log(t.pass ? 'success' : 'error', `${t.name}: ${t.pass ? 'GEÇTİ ✓' : 'BAŞARISIZ ✗'} ${t.error}`);
@@ -640,12 +677,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 log('test', '═══════════════════════════════════════════');
                 log(data.allPassed ? 'success' : 'error', data.allPassed
-                    ? '  TÜM 11 PYTHON TESTİ GEÇTİ ✓ – Python Motoru Doğrulandı!'
-                    : '  BAZI PYTHON TESTLERİ BAŞARISIZ ✗');
+                    ? `  TÜM ${totalCount} PYTHON TESTİ GEÇTİ ✓ – Python Motoru Doğrulandı!`
+                    : `  ${passedCount}/${totalCount} PYTHON TESTİ GEÇTİ – HATA VAR ✗`);
                 log('test', '═══════════════════════════════════════════');
                 
                 resultSnell.className = `verification-badge ${data.allPassed ? 'pass' : 'fail'}`;
-                resultSnell.textContent = data.allPassed ? '✓ 11/11 PYTHON OK' : '✗ HATA';
+                resultSnell.textContent = `${passedCount}/${totalCount} PYTHON OK`;
                 return data.allPassed;
             } catch (e) {
                 log('error', `Python testleri çalıştırılamadı: ${e.message}. JS testleri çalıştırılıyor.`);
@@ -826,8 +863,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 log(result.bitErrorRate === 0 ? 'success' : 'warn',
                     `[Python] BER: <span class="highlight">${(result.bitErrorRate * 100).toFixed(2)}%</span>, Başarı: <span class="highlight">${result.successRate.toFixed(1)}%</span>`);
 
-                if (result.missedOnes > 0) {
-                    log('warn', `[Python] Kayıp: <span class="highlight">${result.missedOnes}</span> bit alıcıya ulaşamadı`);
+                if (result.missedOnes + result.missedZeros > 0) {
+                    log('warn', `[Python] Kayıp: <span class="highlight">${result.missedOnes} bit-1, ${result.missedZeros} bit-0</span> alıcıya ulaşamadı`);
                 }
 
                 resultBER.textContent = `${(result.bitErrorRate * 100).toFixed(2)}%`;
@@ -914,8 +951,8 @@ document.addEventListener('DOMContentLoaded', () => {
         log(result.bitErrorRate === 0 ? 'success' : 'warn',
             `BER: <span class="highlight">${(result.bitErrorRate * 100).toFixed(2)}%</span>, Başarı: <span class="highlight">${result.successRate.toFixed(1)}%</span>`);
 
-        if (result.missedOnes > 0) {
-            log('warn', `Kayıp: <span class="highlight">${result.missedOnes}</span> bit alıcıya ulaşamadı`);
+        if (result.missedOnes + result.missedZeros > 0) {
+            log('warn', `Kayıp: <span class="highlight">${result.missedOnes} bit-1, ${result.missedZeros} bit-0</span> alıcıya ulaşamadı`);
         }
 
         resultBER.textContent = `${(result.bitErrorRate * 100).toFixed(2)}%`;

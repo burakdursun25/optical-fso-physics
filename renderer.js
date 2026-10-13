@@ -16,6 +16,7 @@ class FSORenderer {
         this.topCtx = topCanvas.getContext('2d');
         this.sideCtx = sideCanvas.getContext('2d');
         this.pixelRatio = window.devicePixelRatio || 1;
+        this.atmosphereRanges = new WeakMap();
 
         this.colors = {
             bg: '#0f1625',
@@ -101,12 +102,17 @@ class FSORenderer {
     }
 
     _drawHeatmap(ctx, atm, gridW, gridH, cellW, cellH, padding, viewType) {
-        // Find n range for color mapping
-        let nMin = Infinity, nMax = -Infinity;
-        for (let i = 0; i < atm.grid.length; i++) {
-            if (atm.grid[i] < nMin) nMin = atm.grid[i];
-            if (atm.grid[i] > nMax) nMax = atm.grid[i];
+        let range = this.atmosphereRanges.get(atm);
+        if (!range) {
+            let nMin = Infinity, nMax = -Infinity;
+            for (let i = 0; i < atm.grid.length; i++) {
+                if (atm.grid[i] < nMin) nMin = atm.grid[i];
+                if (atm.grid[i] > nMax) nMax = atm.grid[i];
+            }
+            range = { nMin, nMax };
+            this.atmosphereRanges.set(atm, range);
         }
+        const { nMin, nMax } = range;
 
         // Use middle slice for the other axis
         const midSlice = viewType === 'top'
