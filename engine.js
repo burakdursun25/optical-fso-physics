@@ -416,12 +416,13 @@ function vectorialSnellLaw(incident, normal, n1, n2) {
         adjustedCos = -cosTheta_i;
     }
 
-    const sin2Theta_i = 1 - adjustedCos * adjustedCos;
+    adjustedCos = Math.min(1, adjustedCos);   // rounding can give 1+eps near normal incidence -> acos NaN
+    const sin2Theta_i = Math.max(0, 1 - adjustedCos * adjustedCos);
     const sin2Theta_t = ratio * ratio * sin2Theta_i;
 
     if (sin2Theta_t > 1.0) return null; // TIR
 
-    const cosTheta_t = Math.sqrt(1 - sin2Theta_t);
+    const cosTheta_t = Math.sqrt(Math.max(0, 1 - sin2Theta_t));
     const t = i.scale(ratio).add(
         adjustedNormal.scale(ratio * adjustedCos - cosTheta_t)
     );
@@ -436,8 +437,8 @@ function vectorialSnellLaw(incident, normal, n1, n2) {
 }
 
 function verifySnellLaw(n1, n2, cosTheta_i, cosTheta_t) {
-    const sinTheta_i = Math.sqrt(1 - cosTheta_i * cosTheta_i);
-    const sinTheta_t = Math.sqrt(1 - cosTheta_t * cosTheta_t);
+    const sinTheta_i = Math.sqrt(Math.max(0, 1 - cosTheta_i * cosTheta_i));
+    const sinTheta_t = Math.sqrt(Math.max(0, 1 - cosTheta_t * cosTheta_t));
     const lhs = n1 * sinTheta_i;
     const rhs = n2 * sinTheta_t;
     const error = Math.abs(lhs - rhs);

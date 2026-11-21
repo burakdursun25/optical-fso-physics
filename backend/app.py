@@ -12,6 +12,7 @@ from backend.engine import (Vec3, AtmosphereGrid, RayTracer, DataTransmissionSim
                              AtmosphericLoss, vectorialSnellLaw, verifySnellLaw,
                              LensSystem, EnvironmentPresets, ComprehensiveTransmissionTest)
 from backend.comsol import COMSOLBridge
+from backend import bitcheck, numerics, optics, materials
 
 app = FastAPI(title="FSO Physics Engine Backend")
 logger = logging.getLogger(__name__)
@@ -78,6 +79,11 @@ class SendDataParams(BaseModel):
     simParams: SimParams
     pattern: Literal["alternating", "all_ones", "all_zeros", "random", "burst", "prbs7", "ascii_hello"] = "random"
     numBits: int = Field(32, ge=1, le=10000)
+    # end-to-end check + selective retransmission (arq.run_end_to_end)
+    useArq: bool = True
+    segmentBytes: int = Field(4, ge=1, le=255)
+    maxRetries: int = Field(20, ge=0, le=200)
+    seed: int = Field(0, ge=0, le=2**31 - 1)
 
 class TransmissionTestParams(BaseModel):
     gridX: int = Field(30, ge=1, le=500)
@@ -143,6 +149,11 @@ def serialize_trace(trace: Dict[str, Any]) -> Dict[str, Any]:
             evt_dict["incidentDir"] = serialize_vec3(e["incidentDir"])
         if "refractedDir" in e:
             evt_dict["refractedDir"] = serialize_vec3(e["refractedDir"])
+        # incidence/refraction cosines (the verification table needs them; they were
+        # previously dropped here, so the UI computed acos(undefined) = NaN)
+        for ck in ("cosTheta_i", "cosTheta_t"):
+            if ck in e:
+                evt_dict[ck] = e[ck]
         if "verification" in e:
             v = e["verification"]
             evt_dict["verification"] = {
@@ -166,9 +177,10 @@ def serialize_trace(trace: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 # ── Helper to build grid & transmitter ──────────────────────
-def run_simulation_backend(p: SimParams):
+def build_atmosphere(p: SimParams):
+    """Build the AtmosphereGrid for SimParams (honouring environmentPreset).
+    Returns (atmosphere, weather); shared by /api/simulate and /api/propagation3d."""
     wavelengthUm = p.wavelengthNm / 1000.0
-    laserPower_W = p.laserPower_mW / 1000.0
 
     # Apply environment preset if set (overrides individual params)
     thermal_profile = p.thermalProfile
@@ -199,6 +211,12 @@ def run_simulation_backend(p: SimParams):
         "wavelengthUm": wavelengthUm,
         "useEdlen": True
     })
+    return atmosphere, weather
+
+
+def run_simulation_backend(p: SimParams):
+    laserPower_W = p.laserPower_mW / 1000.0
+    atmosphere, weather = build_atmosphere(p)
 
     rayTracer = RayTracer(atmosphere)
 
@@ -265,6 +283,22 @@ def serve_renderer_js():
 def serve_app_js():
     return FileResponse(os.path.join(_ROOT, "app.js"), media_type="application/javascript")
 
+@app.get("/viz3d.js")
+def serve_viz3d_js():
+    return FileResponse(os.path.join(_ROOT, "viz3d.js"), media_type="application/javascript")
+
+@app.get("/duplex.js")
+def serve_duplex_js():
+    return FileResponse(os.path.join(_ROOT, "duplex.js"), media_type="application/javascript")
+
+@app.get("/lens-designer.js")
+def serve_lens_designer_js():
+    return FileResponse(os.path.join(_ROOT, "lens-designer.js"), media_type="application/javascript")
+
+@app.get("/ui-v2.css")
+def serve_ui_v2_css():
+    return FileResponse(os.path.join(_ROOT, "ui-v2.css"), media_type="text/css")
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "backend": "python"}
@@ -283,6 +317,60 @@ def simulate(p: SimParams):
         return coerce_numpy(res)
     except Exception as error:
         raise internal_server_error(error) from error
+
+def _send_data_end_to_end(params, p, trace, link_budget, sourcePos, targetPos, recvR, data,
+                          serialized_results, res):
+    """Whole message crosses the full grid distance first; only then the receiver checks CRCs and
+    asks for the failed segments again (see arq.run_end_to_end).  The legacy per-bit fields in `res`
+    are rewritten to describe the FIRST PASS (what arrived before any retransmission)."""
+    distance = sourcePos.sub(targetPos).length()
+    lat = trace.get("exitPosition")
+    lateral = None if not lat else math.hypot(lat.y - targetPos.y, lat.z - targetPos.z)
+    blocked = (not trace.get("success", False)) or lateral is None or lateral > recvR
+    # noise floor such that BER = 1e-9 exactly at the receiver sensitivity (P/noise = 12 -> SNR 144)
+    noise_dBm = p.receiverSensitivity_dBm - 10.0 * math.log10(12.0)
+    sigma_I2 = propagation3d.scintillation_index_from_rytov(float(link_budget["scintillation"]["sigma2_R"]))
+    channel = arq_mod.ArqChannel(p_rx_dBm=float(link_budget["P_rx_dBm"]), noise_rms_dBm=noise_dBm,
+                                 sigma_I2=sigma_I2, fading_rho=0.0,
+                                 ber_override=0.5 if blocked else None)
+    e2e = arq_mod.run_end_to_end(data, params.segmentBytes, params.maxRetries, channel, 0.0, params.seed)
+    first = e2e["first_pass_bits"]
+    for i, r in enumerate(serialized_results):
+        if i < len(serialized_results) - 1:
+            r["trace"] = None      # identical ray path for every bit: ship it once (last entry)
+            if len(serialized_results) > 512:
+                r["linkBudget"] = None     # likewise the (identical) link budget, for big messages
+        r["received"] = first[i]
+        r["correct"] = first[i] == data[i]
+    correct = sum(1 for a, b in zip(data, first) if a == b)
+    n = len(data)
+    res.update({
+        "correctBits": correct, "bitErrorRate": 1.0 - correct / n, "successRate": 100.0 * correct / n,
+        "totalOnes": sum(data), "totalZeros": n - sum(data),
+        "missedOnes": sum(1 for a, b in zip(data, first) if a == 1 and b != 1),
+        "missedZeros": sum(1 for a, b in zip(data, first) if a == 0 and b != 0),
+    })
+    a = e2e["arq"]
+    return {
+        "distance_used_m": distance, "grid_distance_m": p.gridX * p.cellSize,
+        "link": {"p_rx_dBm": channel.p_rx_dBm, "noise_rms_dBm": noise_dBm, "sigma_I2": sigma_I2,
+                 "mean_ber": channel.mean_ber(), "effective_ber": channel.faded_mean_ber(),
+                 "beam_blocked": bool(blocked), "lateral_deviation_m": lateral,
+                 "one_way_delay_s": distance / 299792458.0},
+        "sent_bits": list(data), "first_pass_bits": first, "reassembled_bits": e2e["reassembled_bits"],
+        "first_pass_bit_errors": e2e["first_pass_bit_errors"],
+        "segment_bytes_used": e2e["segment_bytes_used"], "pad_bits": e2e["pad_bits"],
+        "n_segments": e2e["n_segments"], "n_rounds": e2e["n_rounds"],
+        "rounds": e2e["rounds"], "final_check": e2e["final_check"],
+        "arq": {k: a[k] for k in ("segments", "retries_per_region", "retries_histogram", "total_transmissions",
+                                   "retransmissions", "efficiency", "goodput_ratio", "spurious_retransmissions",
+                                   "histories_truncated", "budget_exhausted", "rounds_truncated",
+                                   "data_wire_bits", "feedback_wire_bits", "max_retries", "segment_bytes",
+                                   "residual_errors", "n_segments")},
+        "totalRetransmissions": a["retransmissions"], "efficiency": a["efficiency"],
+        "retransmissionRounds": max(0, e2e["n_rounds"] - 1),
+    }
+
 
 @app.post("/api/send-data")
 def send_data(params: SendDataParams):
@@ -327,6 +415,11 @@ def send_data(params: SendDataParams):
             "missedZeros": results["missedZeros"],
             "successRate": results["successRate"]
         }
+        if params.useArq:
+            res.update(_send_data_end_to_end(params, p, trace, link_budget, sourcePos, targetPos, recvR,
+                                             data, serialized_results, res))
+        else:
+            res["arq"] = None
         return coerce_numpy(res)
     except Exception as error:
         raise internal_server_error(error) from error
@@ -579,6 +672,145 @@ def get_presets():
         "lensTypes": LensSystem.LENS_TYPES
     }
 
+# ── Bit check / optics / numerics endpoints ─────────────────
+
+LensPresetName = Literal["none", "collimating", "focusing", "keplerian_telescope",
+                         "galilean_telescope", "cassegrain", "diverging"]
+
+
+class BitCheckParams(BaseModel):
+    payload: str = Field("Merhaba FSO", min_length=0, max_length=512)
+    distanceM: float = Field(1000.0, ge=0.0, le=1e6)
+    lensPreset: LensPresetName = "none"
+    seed: int = Field(0, ge=0, le=2**31 - 1)
+    txPowerDbm: float = Field(10.0, ge=-60.0, le=60.0)
+    noiseRmsDbm: float = Field(-30.0, ge=-120.0, le=0.0)
+    sensitivityDbm: Optional[float] = Field(None, ge=-150.0, le=60.0)
+    includeBits: bool = True
+
+    @model_validator(mode="after")
+    def _payload_size(self):
+        if len(self.payload.encode("utf-8")) > 512:
+            raise ValueError("payload must be at most 512 bytes")
+        return self
+
+
+class LinkGainParams(BaseModel):
+    lensPreset: LensPresetName = "keplerian_telescope"
+    distancesM: List[float] = Field(default_factory=lambda: [100.0, 1000.0, 5000.0],
+                                    min_length=1, max_length=200)
+    wavelengthM: float = Field(1550e-9, ge=200e-9, le=20e-6)
+    rxRadiusM: float = Field(0.025, gt=0.0, le=10.0)
+
+    @model_validator(mode="after")
+    def _distances(self):
+        if any((not math.isfinite(d)) or d < 0 or d > 1e6 for d in self.distancesM):
+            raise ValueError("every distance must be within [0, 1e6] m")
+        return self
+
+
+CONVERGENCE_METHODS = ("trapezoid", "simpson", "gauss_legendre", "euler", "rk4")
+CONVERGENCE_PROBLEMS = {
+    # name: (integrand f, a, b, exact)   -- ODE methods use y' = -y, y(0)=1 on [0, 1]
+    "sin": (math.sin, 0.0, math.pi, 2.0),
+    "exp": (math.exp, 0.0, 1.0, math.e - 1.0),
+    "gaussian": (lambda x: math.exp(-x * x), 0.0, 1.0, 0.7468241328124271),
+}
+
+
+class ConvergenceParams(BaseModel):
+    method: Literal["trapezoid", "simpson", "gauss_legendre", "euler", "rk4"] = "simpson"
+    problem: Literal["sin", "exp", "gaussian"] = "sin"
+    ns: List[int] = Field(default_factory=lambda: [2, 4, 8, 16, 32], min_length=2, max_length=20)
+
+    @model_validator(mode="after")
+    def _ns(self):
+        if any(n < 1 or n > 4096 for n in self.ns):
+            raise ValueError("each n must be within [1, 4096]")
+        if self.method == "simpson" and any(n % 2 for n in self.ns):
+            raise ValueError("simpson requires even n")
+        if self.method == "gauss_legendre" and any(n > 64 for n in self.ns):
+            raise ValueError("gauss_legendre n must be <= 64")
+        if len(set(self.ns)) != len(self.ns):
+            raise ValueError("ns must be distinct")
+        return self
+
+
+@app.post("/api/bitcheck")
+def bitcheck_endpoint(p: BitCheckParams):
+    """Frame a text payload, send it over the modelled link, compare bits + CRC."""
+    try:
+        rep = bitcheck.run_link_check(
+            p.payload, p.distanceM, p.lensPreset, seed=p.seed,
+            tx_power_dBm=p.txPowerDbm, noise_rms_dBm=p.noiseRmsDbm,
+            sensitivity_dBm=p.sensitivityDbm)
+        if not p.includeBits:
+            rep.pop("sent_bits", None)
+            rep.pop("received_bits", None)
+        return coerce_numpy(rep)
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
+@app.get("/api/optics/presets")
+def optics_presets():
+    try:
+        out = []
+        for key in optics.FSO_LENS_PRESETS:
+            pr = optics.build_preset(key)
+            mag = pr.magnification
+            out.append({
+                "key": key, "name": pr.name, "description": pr.description, "role": pr.role,
+                "defaultW0M": pr.default_w0, "sourceOffsetM": pr.source_offset_m,
+                "magnification": None if (mag is None or not math.isfinite(mag)) else mag,
+                "params": pr.params,
+            })
+        return {"presets": out}
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
+@app.post("/api/optics/link-gain")
+def optics_link_gain(p: LinkGainParams):
+    try:
+        rows = []
+        for d in p.distancesM:
+            b = optics.lens_link_budget(p.lensPreset, d, wavelength=p.wavelengthM,
+                                        rx_radius=p.rxRadiusM)
+            rows.append({"distanceM": d, **b})
+        return coerce_numpy({"preset": p.lensPreset, "rows": rows})
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
+@app.post("/api/numerics/convergence")
+def numerics_convergence(p: ConvergenceParams):
+    try:
+        f, a, b, exact = CONVERGENCE_PROBLEMS[p.problem]
+        if p.method in ("euler", "rk4"):
+            solver = numerics.euler if p.method == "euler" else numerics.rk4
+            exact = math.exp(-1.0)
+            rows = []
+            for n in p.ns:
+                _, y = solver(lambda t, y: -y, 1.0, 0.0, 1.0, n)
+                v = float(y[-1][0])
+                rows.append({"n": n, "h": 1.0 / n, "value": v, "abs_error": abs(v - exact)})
+            problem = "y' = -y, y(0)=1 on [0,1]"
+        else:
+            method = getattr(numerics, p.method)
+            rows = numerics.convergence_study(method, f, exact, p.ns, a, b)
+            problem = p.problem
+        usable = [r for r in rows if r["abs_error"] > 1e-14]
+        order = None
+        if len(usable) >= 2:
+            order = numerics.convergence_order([r["abs_error"] for r in usable],
+                                               [r["h"] for r in usable])
+        return coerce_numpy({"method": p.method, "problem": problem, "exact": exact,
+                             "rows": rows, "order": order})
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
 # ── COMSOL Export Endpoints ─────────────────────────────────
 @app.post("/api/export/csv-grid")
 def export_csv_grid(p: SimParams):
@@ -647,3 +879,503 @@ def export_comsol_params(p: SimParams):
         return {"filename": "comsol_parameters.txt", "content": params_txt, "mimeType": "text/plain"}
     except Exception as error:
         raise internal_server_error(error) from error
+
+
+# ══════════════════════════════════════════════════════════════
+# v2 endpoints: 3D propagation, selective-repeat ARQ, full duplex
+# (contract: reports/api_contract_v2.md)
+# ══════════════════════════════════════════════════════════════
+from backend import propagation3d, arq as arq_mod, duplex as duplex_mod  # noqa: E402
+
+MAX_PROP_CELLS = 40_000
+Vec3Param = Field(None, min_length=3, max_length=3)
+
+
+class AnomalyParams(BaseModel):
+    """Box-shaped local disturbance (metres, world coordinates)."""
+    center: List[float] = Field(..., min_length=3, max_length=3)
+    size: List[float] = Field(..., min_length=3, max_length=3)
+    cn2_factor: float = Field(1.0, ge=0.0, le=1e6)
+    extra_alpha_dB_km: float = Field(0.0, ge=0.0, le=1000.0)
+    delta_T: float = Field(0.0, ge=-100.0, le=100.0)
+
+    @model_validator(mode="after")
+    def _finite(self):
+        if any((not math.isfinite(v)) for v in self.center + self.size) or any(v <= 0 for v in self.size):
+            raise ValueError("anomaly center must be finite and size positive")
+        return self
+
+
+def _grid_for_distance(atm: SimParams, distance_m: float) -> SimParams:
+    """Rebuild the grid so gridX * cellSize == distance_m within MAX_PROP_CELLS.
+
+    Transverse cells (gridY/gridZ) are kept (reduced only if needed so >= 20 x-cells fit); the target cell
+    size is the sidebar cellSize, but gridX is clamped to [20, limit/(gridY*gridZ)] so the cell size adapts.
+    """
+    gy, gz = atm.gridY, atm.gridZ
+    while 20 * gy * gz > MAX_PROP_CELLS:
+        if gz >= gy and gz > 1:
+            gz -= 1
+        else:
+            gy -= 1
+    gx_max = max(1, min(600, MAX_PROP_CELLS // (gy * gz)))
+    gx = int(min(max(round(distance_m / atm.cellSize), 20), gx_max))
+    cell = distance_m / gx
+    while gz * cell > MAX_ATMOSPHERE_HEIGHT_M and gz > 1:
+        gz -= 1
+    return atm.model_copy(update={"gridX": gx, "gridY": gy, "gridZ": gz, "cellSize": cell})
+
+
+class Propagation3DParams(BaseModel):
+    atmosphere: SimParams = Field(default_factory=SimParams)
+    source: Optional[List[float]] = Vec3Param
+    target: Optional[List[float]] = Vec3Param
+    w0: Optional[float] = Field(None, gt=0.0, le=1.0)
+    lensPreset: LensPresetName = "none"
+    nSamples: int = Field(200, ge=20, le=400)
+    nRays: int = Field(16, ge=3, le=24)
+    seed: int = Field(0, ge=0, le=2**31 - 1)
+    rxRadiusM: float = Field(0.05, gt=0.0, le=10.0)
+    m2: float = Field(1.0, ge=1.0, le=10.0)
+    maxVoxels: int = Field(2000, ge=1, le=4000)
+    anomalies: List[AnomalyParams] = Field(default_factory=list, max_length=8)
+    distanceM: Optional[float] = Field(None, ge=100.0, le=20000.0)
+
+    @model_validator(mode="after")
+    def _limits(self):
+        if self.distanceM is not None:
+            self.atmosphere = _grid_for_distance(self.atmosphere, self.distanceM)
+        a = self.atmosphere
+        if a.gridX * a.gridY * a.gridZ > MAX_PROP_CELLS:
+            raise ValueError(f"grid exceeds the {MAX_PROP_CELLS} cell limit for 3D propagation")
+        if self.lensPreset == "focusing":
+            raise ValueError("lensPreset 'focusing' is a receive lens; use a transmit preset")
+        bx, by, bz = a.gridX * a.cellSize, a.gridY * a.cellSize, a.gridZ * a.cellSize
+        for name, pt in (("source", self.source), ("target", self.target)):
+            if pt is not None:
+                if (not all(math.isfinite(c) for c in pt) or not (0 <= pt[0] <= bx and 0 <= pt[1] <= by
+                                                                  and 0 <= pt[2] <= bz)):
+                    raise ValueError(f"{name} must lie inside the grid bounds")
+        if self.source is not None and self.source == self.target:
+            raise ValueError("source and target must differ")
+        return self
+
+
+def _default_endpoints(p: Propagation3DParams):
+    a = p.atmosphere
+    src = p.source or [0.0, a.gridY * a.cellSize * 0.5, a.gridZ * a.cellSize * 0.5]
+    tgt = p.target or [a.gridX * a.cellSize, a.gridY * a.cellSize * 0.5, a.gridZ * a.cellSize * 0.5]
+    return src, tgt
+
+
+def run_propagation(p: Propagation3DParams, grid_weather=None, wavelength_nm=None,
+                    reverse: bool = False) -> Dict[str, Any]:
+    """Build the grid from SimParams (same builder as /api/simulate) and propagate."""
+    atmosphere, weather = grid_weather or build_atmosphere(p.atmosphere)
+    src, tgt = _default_endpoints(p)
+    if reverse:
+        src, tgt = tgt, src
+    lam = (wavelength_nm or p.atmosphere.wavelengthNm) * 1e-9
+    return propagation3d.propagate_beam_3d(
+        atmosphere, src, tgt, w0=p.w0, wavelength=lam,
+        lens_preset=None if p.lensPreset == "none" else p.lensPreset,
+        n_samples=p.nSamples, n_rays=p.nRays, seed=p.seed, weather=weather,
+        rx_radius=p.rxRadiusM, m2=p.m2, anomalies=[a.model_dump() for a in p.anomalies],
+        max_voxels=p.maxVoxels)
+
+
+def _value_error_422(error: ValueError) -> HTTPException:
+    return HTTPException(status_code=422, detail=str(error))
+
+
+@app.post("/api/propagation3d")
+def propagation3d_endpoint(p: Propagation3DParams):
+    """3D beam propagation: centerline, 1/e^2 rings, degradation cloud, summary."""
+    try:
+        res = run_propagation(p)
+        res["meta"] = {"wavelengthNm": p.atmosphere.wavelengthNm, "weather": p.atmosphere.weather,
+                       "cells": p.atmosphere.gridX * p.atmosphere.gridY * p.atmosphere.gridZ,
+                       "grid": {"gridX": p.atmosphere.gridX, "gridY": p.atmosphere.gridY,
+                                "gridZ": p.atmosphere.gridZ, "cellSize": p.atmosphere.cellSize},
+                       "source": _default_endpoints(p)[0], "target": _default_endpoints(p)[1]}
+        return coerce_numpy(res)
+    except ValueError as error:
+        raise _value_error_422(error) from error
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
+class ArqParams(BaseModel):
+    payload: str = Field("Merhaba FSO! Seçici tekrar (selective repeat) ARQ testi.", min_length=1,
+                         max_length=2048)
+    segmentBytes: int = Field(8, ge=1, le=255)
+    maxRetries: int = Field(5, ge=0, le=200)
+    seed: int = Field(0, ge=0, le=2**31 - 1)
+    ackBer: float = Field(0.0, ge=0.0, le=0.5)
+    ber: Optional[float] = Field(None, ge=0.0, le=1.0)      # fixed forward BER (disables fading/link model)
+    # link model (used when ber is None and propagation is None)
+    distanceM: float = Field(1000.0, gt=0.0, le=1e6)
+    lensPreset: LensPresetName = "none"
+    txPowerDbm: float = Field(10.0, ge=-60.0, le=60.0)
+    wavelengthNm: float = Field(1550.0, ge=200.0, le=20000.0)
+    rxRadiusM: float = Field(0.025, gt=0.0, le=10.0)
+    atmosDbPerKm: float = Field(0.2, ge=0.0, le=1000.0)
+    fixedLossDb: float = Field(3.0, ge=0.0, le=100.0)
+    extraLossDb: float = Field(0.0, ge=-50.0, le=200.0)
+    noiseRmsDbm: float = Field(-30.0, ge=-120.0, le=0.0)
+    cn2: float = Field(1e-15, ge=0.0, le=1e-10)
+    fadingRho: float = Field(0.0, ge=0.0, lt=1.0)
+    spatialBins: int = Field(10, ge=2, le=20)
+    propagation: Optional[Propagation3DParams] = None
+
+    @model_validator(mode="after")
+    def _sizes(self):
+        if len(self.payload.encode("utf-8")) > 2048:
+            raise ValueError("payload must be at most 2048 bytes")
+        n = math.ceil(len(self.payload.encode("utf-8")) / self.segmentBytes)
+        if n > arq_mod.MAX_SEGMENTS:
+            raise ValueError(f"{n} segments exceed the {arq_mod.MAX_SEGMENTS} segment limit")
+        return self
+
+
+@app.post("/api/arq")
+def arq_endpoint(p: ArqParams):
+    """CRC-based selective-repeat ARQ over a fading link (optionally fed by a 3D propagation)."""
+    try:
+        prop = None
+        channel = None
+        if p.ber is None:
+            if p.propagation is not None:
+                prop = run_propagation(p.propagation)
+                channel = arq_mod.channel_from_propagation(
+                    prop, p.txPowerDbm, p.fixedLossDb, p.noiseRmsDbm, p.fadingRho)
+            else:
+                channel = arq_mod.channel_from_link(
+                    p.lensPreset, p.distanceM, p.txPowerDbm, p.wavelengthNm * 1e-9, p.rxRadiusM,
+                    p.atmosDbPerKm, p.fixedLossDb, p.noiseRmsDbm, p.cn2, p.fadingRho, p.extraLossDb)
+        elif p.propagation is not None:
+            prop = run_propagation(p.propagation)      # spatial view only
+        res = arq_mod.run_arq(p.payload, p.segmentBytes, p.maxRetries, channel=channel, ber=p.ber,
+                              ack_ber=p.ackBer, seed=p.seed, propagation=prop,
+                              n_spatial_bins=p.spatialBins)
+        res["channel"] = {"p_rx_dBm": None if channel is None else channel.p_rx_dBm,
+                          "sigma_I2": None if channel is None else channel.sigma_I2,
+                          "mean_ber": res["forward_mean_ber"],
+                          "effective_ber": res["forward_effective_ber"],
+                          # with a 3D propagation the channel IS that propagation's link:
+                          # distanceM is ignored and the link length is reported here
+                          "distance_used_m": prop["summary"]["length_m"] if (prop is not None and channel is not None) else p.distanceM}
+        if prop is not None:      # bounded summary only, not the whole cloud
+            res["propagation_summary"] = {"summary": prop["summary"],
+                                          "hotspot": prop["degradation_cloud"]["hotspot"]}
+        return coerce_numpy(res)
+    except ValueError as error:
+        raise _value_error_422(error) from error
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
+class TerminalParams(BaseModel):
+    txPowerDbm: float = Field(10.0, ge=-60.0, le=60.0)
+    wavelengthNm: float = Field(1550.0, ge=200.0, le=20000.0)
+    txLens: LensPresetName = "none"
+    rxLens: LensPresetName = "none"
+    rxRadiusM: float = Field(0.025, gt=0.0, le=10.0)
+    filterIsolationDb: float = Field(40.0, ge=0.0, le=120.0)
+    sensitivityDbm: float = Field(-40.0, ge=-150.0, le=60.0)
+    noiseRmsDbm: float = Field(-30.0, ge=-120.0, le=0.0)
+    nearEndCouplingDb: float = Field(30.0, ge=0.0, le=120.0)
+
+    @model_validator(mode="after")
+    def _lens_roles(self):
+        if self.txLens == "focusing":
+            raise ValueError("txLens 'focusing' is a receive lens")
+        if self.rxLens not in ("none", "focusing"):
+            raise ValueError("rxLens must be 'none' or 'focusing'")
+        return self
+
+
+class DuplexParams(BaseModel):
+    terminalA: TerminalParams = Field(default_factory=lambda: TerminalParams(wavelengthNm=1550.0))
+    terminalB: TerminalParams = Field(default_factory=lambda: TerminalParams(wavelengthNm=1310.0))
+    payloadA: str = Field("Terminal A -> B: merhaba FSO!", min_length=1, max_length=512)
+    payloadB: str = Field("Terminal B -> A: selam!", min_length=1, max_length=512)
+    distanceM: float = Field(2000.0, gt=0.0, le=1e6)
+    weather: Literal["clear", "haze", "fog", "rain", "snow", "storm"] = "clear"
+    cn2: float = Field(1e-15, ge=0.0, le=1e-10)
+    segmentBytes: int = Field(8, ge=1, le=255)
+    maxRetries: int = Field(5, ge=0, le=200)
+    reciprocityRho: float = Field(0.5, ge=0.0, le=1.0)
+    fadingRho: float = Field(0.0, ge=0.0, lt=1.0)
+    bitrateBps: float = Field(1e9, ge=1e3, le=1e12)
+    seed: int = Field(0, ge=0, le=2**31 - 1)
+    fixedLossDb: float = Field(3.0, ge=0.0, le=100.0)
+    berOverride: Optional[float] = Field(None, ge=0.0, le=1.0)
+    propagation: Optional[Propagation3DParams] = None
+
+    @model_validator(mode="after")
+    def _sizes(self):
+        for name in ("payloadA", "payloadB"):
+            nb = len(getattr(self, name).encode("utf-8"))
+            if nb > 512 or math.ceil(nb / self.segmentBytes) > 64:
+                raise ValueError(f"{name}: at most 512 bytes and 64 segments per direction")
+        return self
+
+
+def _terminal(name: str, t: TerminalParams) -> duplex_mod.Terminal:
+    return duplex_mod.Terminal(name, t.txPowerDbm, t.wavelengthNm, t.txLens, t.rxLens, t.rxRadiusM,
+                               t.filterIsolationDb, t.sensitivityDbm, t.noiseRmsDbm, t.nearEndCouplingDb)
+
+
+@app.post("/api/duplex")
+def duplex_endpoint(p: DuplexParams):
+    """Full-duplex WDM link simulation: both directions + ARQ with piggybacked ACKs."""
+    try:
+        overrides = None
+        distance = p.distanceM
+        weather = p.weather
+        if p.propagation is not None:
+            # The duplex distance is authoritative; the propagation supplies the atmospheric
+            # state (extinction, turbulence) rescaled to that distance (see rescale_propagation)
+            # and the relative spatial profile for the retry-region map.
+            built = build_atmosphere(p.propagation.atmosphere)
+            weather = built[1]
+            fwd = run_propagation(p.propagation, built, p.terminalA.wavelengthNm)
+            rev = run_propagation(p.propagation, built, p.terminalB.wavelengthNm, reverse=True)
+            overrides = {duplex_mod.AB: duplex_mod.rescale_propagation(fwd["summary"], distance),
+                         duplex_mod.BA: duplex_mod.rescale_propagation(rev["summary"], distance)}
+            scales = {k: v.pop("scale") for k, v in overrides.items()}
+            for v in overrides.values():
+                v.pop("source_length_m")
+        res = duplex_mod.run_duplex(
+            _terminal("A", p.terminalA), _terminal("B", p.terminalB), p.payloadA, p.payloadB,
+            distance, weather, p.cn2, p.segmentBytes, p.maxRetries, p.reciprocityRho, p.fadingRho,
+            p.bitrateBps, p.seed, p.fixedLossDb, None, overrides, p.berOverride)
+        if p.propagation is not None:
+            import random as _random
+            for key, prop_res in ((duplex_mod.AB, fwd), (duplex_mod.BA, rev)):
+                arq_res = res["directions"][key]["arq_result"]
+                failed = sum(sg["failed_attempts"] for sg in arq_res["segments"])
+                arq_res["retries_by_spatial_region"] = arq_mod.spatial_retries(
+                    prop_res, failed, _random.Random(p.seed), 10, length_m=distance)
+            res["propagation_summary"] = {duplex_mod.AB: {"summary": fwd["summary"],
+                                                           "hotspot": fwd["degradation_cloud"]["hotspot"]},
+                                          duplex_mod.BA: {"summary": rev["summary"],
+                                                           "hotspot": rev["degradation_cloud"]["hotspot"]}}
+            res["propagation_rescale"] = {
+                "distance_used_m": distance, "propagation_length_m": fwd["summary"]["length_m"],
+                "scale": scales[duplex_mod.AB], "rescaled": abs(scales[duplex_mod.AB] - 1.0) > 0.05,
+                "note": "Mesafe dubleks ayarından alınır; 3B sonuçtan zayıflama ve sintilasyon bu mesafeye ölçeklenir."}
+        return coerce_numpy(res)
+    except ValueError as error:
+        raise _value_error_422(error) from error
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
+# ── Lens designer (materials catalogue, design, ray fan, link effect) ─────────
+@app.get("/api/lens/catalog")
+def lens_catalog():
+    try:
+        return materials.catalog()
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+
+class LensDesignParams(BaseModel):
+    shape: str = "plano_convex"
+    material: str = "n_bk7"
+    focalLengthM: float = Field(0.1, gt=0.0, le=10.0)
+    diameterM: float = Field(0.05, gt=0.0, le=1.0)
+    wavelengthNm: float = Field(1550.0, ge=200.0, le=20000.0)
+    centerThicknessM: Optional[float] = Field(None, gt=0.0, le=1.0)
+    coating: str = "none"
+    filter: Optional[str] = "none"
+    linkDistanceM: float = Field(1000.0, gt=0.0, le=1e6)
+    beamW0M: float = Field(0.002, gt=0.0, le=1.0)
+    bareRxRadiusM: float = Field(0.0125, gt=0.0, le=10.0)
+    nPoints: int = Field(81, ge=41, le=401)
+    nRays: int = Field(9, ge=3, le=21)
+
+
+def _surface_hit(z0: float, y0: float, dz: float, dy: float, vz: float, R: float, k: float):
+    """Intersect the ray (z0,y0)+t(dz,dy) with the conic surface z = vz + sag(R,k;y).
+    Returns (z, y, nz, ny) with the unit surface normal pointing to +z, or None."""
+    def sag(y):
+        return materials._sag(R, y, k)
+
+    def dsag(y):
+        if math.isinf(R):
+            return 0.0
+        c = 1.0 / R
+        return c * y / math.sqrt(max(1e-18, 1.0 - (1.0 + k) * c * c * y * y))
+
+    z = vz
+    for _ in range(60):                    # Newton on g(z) = z - vz - sag(y(z))
+        y = y0 + (dy / dz) * (z - z0)
+        g = z - vz - sag(y)
+        gp = 1.0 - dsag(y) * (dy / dz)
+        if abs(gp) < 1e-12:
+            return None
+        z_new = z - g / gp
+        if abs(z_new - z) < 1e-14:
+            z = z_new
+            break
+        z = z_new
+    y = y0 + (dy / dz) * (z - z0)
+    s = dsag(y)
+    norm = math.hypot(1.0, s)
+    return z, y, 1.0 / norm, -s / norm
+
+
+def _refract(dz: float, dy: float, nz: float, ny: float, n1: float, n2: float):
+    """Vector Snell law in 2D; returns the new unit direction or None (total internal reflection)."""
+    cosi = dz * nz + dy * ny
+    if cosi < 0:
+        nz, ny, cosi = -nz, -ny, -cosi
+    r = n1 / n2
+    kk = 1.0 - r * r * (1.0 - cosi * cosi)
+    if kk < 0:
+        return None
+    t = r * cosi - math.sqrt(kk)
+    return r * dz - t * nz, r * dy - t * ny
+
+
+def _trace_ray(y_in: float, z_start: float, vz2: float, R1: float, R2: float, k2: float, n: float):
+    z1 = _surface_hit(z_start, y_in, 1.0, 0.0, 0.0, R1, 0.0)
+    if z1 is None:
+        return None
+    za, ya, nza, nya = z1
+    d1 = _refract(1.0, 0.0, nza, nya, 1.0, n)
+    if d1 is None:
+        return None
+    n2 = _surface_hit(za, ya, d1[0], d1[1], vz2, R2, k2)
+    if n2 is None:
+        return None
+    zb, yb, nzb, nyb = n2
+    d2 = _refract(d1[0], d1[1], nzb, nyb, n, 1.0)
+    if d2 is None:
+        return None
+    return (za, ya), (zb, yb), d2
+
+
+def design_lens_full(p: LensDesignParams) -> Dict[str, Any]:
+    lam = p.wavelengthNm * 1e-9
+    if p.shape not in materials.LENS_SHAPES:
+        raise ValueError(f"Bilinmeyen lens şekli: {p.shape!r}")
+    if p.material not in materials.LENS_MATERIALS:
+        raise ValueError(f"Bilinmeyen malzeme: {p.material!r}")
+    if p.coating not in materials.COATINGS:
+        raise ValueError(f"Bilinmeyen kaplama: {p.coating!r}")
+    filt = p.filter if p.filter not in (None, "", "none") else None
+    if filt is not None and filt not in materials.FILTERS:
+        raise ValueError(f"Bilinmeyen filtre: {filt!r}")
+    if not materials.LENS_SHAPES[p.shape]["designable"]:
+        raise ValueError(f"'{p.shape}' şekli yalnızca açıklayıcıdır, tasarlanamaz (çok malzemeli/GRIN).")
+    if not materials.is_transparent(p.material, lam):
+        lo, hi = materials.LENS_MATERIALS[p.material]["transmission_um"]
+        raise ValueError(f"{p.material} malzemesi {p.wavelengthNm:.0f} nm dalga boyunda opak "
+                         f"(geçirgenlik bandı {lo:g}–{hi:g} µm). Başka bir malzeme seçin.")
+    try:
+        d = materials.design_lens(p.shape, p.material, p.focalLengthM, p.diameterM, lam,
+                                  p.centerThicknessM, p.coating, None, p.nPoints)
+    except ValueError as error:
+        raise ValueError(f"Lens tasarlanamadı: {error}") from error
+
+    n = d["n_used"]
+    R1 = d["R1_m"] if d["R1_m"] is not None else math.inf
+    R2 = d["R2_m"] if d["R2_m"] is not None else math.inf
+    tc = d["center_thickness_m"]
+    D = d["diameter_m"]
+    h = D / 2.0
+    f_sig = d["focal_length_m"]
+    k2 = d["conic_k2"]
+
+    # ABCD summary (thick lens, principal planes)
+    M = optics.thick_lens(n, R1, R2, tc)
+    C = float(M[1][0])
+    efl = math.inf if abs(C) < 1e-15 else -1.0 / C
+    abcd = {"A": float(M[0][0]), "B": float(M[0][1]), "C": C, "D": float(M[1][1]),
+            "efl_m": None if math.isinf(efl) else efl,
+            "bfd_m": None if abs(C) < 1e-15 else -float(M[0][0]) / C,
+            "ffd_m": None if abs(C) < 1e-15 else -float(M[1][1]) / C}
+
+    # exact-Snell ray fan (rays parallel to the axis)
+    sag_max = 0.0
+    try:
+        sag_max = abs(materials._sag(R1, h))
+    except ValueError:
+        pass
+    z_start = -(0.25 * D + sag_max + 0.02 * abs(f_sig))
+    vz2 = tc
+    para = _trace_ray(h * 1e-3, z_start, vz2, R1, R2, k2, n)
+    focus_z = None
+    if para is not None:
+        (_, _), (zb, yb), dd = para
+        if abs(dd[1]) > 1e-15:
+            focus_z = zb - yb * dd[0] / dd[1]
+    bfd = None if focus_z is None else focus_z - tc
+    z_end = tc + (0.6 * abs(f_sig) if (focus_z is None or f_sig < 0) else max(1.3 * (focus_z - tc), 0.1 * abs(f_sig)))
+    if focus_z is not None and f_sig > 0:
+        z_end = max(z_end, focus_z + 0.15 * abs(f_sig))
+    rays = []
+    marginal_cross = None
+    for i in range(p.nRays):
+        frac = -0.9 + 1.8 * i / (p.nRays - 1)
+        y_in = frac * h
+        try:
+            tr = _trace_ray(y_in, z_start, vz2, R1, R2, k2, n)
+        except ValueError:
+            tr = None
+        if tr is None:
+            continue
+        (za, ya), (zb, yb), dd = tr
+        t_end = (z_end - zb) / dd[0] if dd[0] > 1e-12 else 0.0
+        pts = [[z_start, y_in], [za, ya], [zb, yb], [z_end, yb + dd[1] * t_end]]
+        rays.append({"y_in": y_in, "points": pts})
+        if abs(frac - 0.9) < 1e-9 and abs(dd[1]) > 1e-15:
+            marginal_cross = zb - yb * dd[0] / dd[1]
+    lsa = None if (marginal_cross is None or focus_z is None) else marginal_cross - focus_z
+
+    t_filter = materials.filter_transmittance(filt, lam) if filt else 1.0
+    t_total = d["transmittance"] * t_filter
+
+    # link effect: receiver aperture = lens diameter x transmittance, vs a bare receiver
+    w = optics.beam_radius(p.linkDistanceM, p.beamW0M, lam)
+    frac_bare = max(optics.received_power_fraction(w, p.bareRxRadiusM), 1e-300)
+    frac_lens = max(optics.received_power_fraction(w, h) * t_total, 1e-300)
+    gain = 10.0 * math.log10(frac_lens / frac_bare)
+    airy = optics.airy_radius(lam, abs(f_sig), D) if f_sig > 0 else None
+    link = {"gain_dB": gain, "beam_radius_at_rx_m": w, "frac_bare": frac_bare, "frac_lens": frac_lens,
+            "bare_rx_radius_m": p.bareRxRadiusM, "lens_rx_radius_m": h, "link_distance_m": p.linkDistanceM,
+            "receiver_suitable": f_sig > 0, "airy_radius_m": airy,
+            "note_tr": ("Iraksatıcı (negatif) lens alıcı olarak kullanılamaz; kazanç yalnızca açıklık etkisini gösterir."
+                        if f_sig <= 0 else
+                        "Kazanç = (lens açıklığı × toplam iletim) ile çıplak alıcı arasındaki toplanan güç oranı.")}
+    d_out = {k: v for k, v in d.items()}
+    return {
+        "design": d_out,
+        "filter": {"key": filt or "none", "transmittance": t_filter,
+                   "name_tr": materials.FILTERS[filt]["name_tr"] if filt else "Filtre yok"},
+        "total_transmittance": t_total,
+        "abcd": abcd,
+        "ray_fan": {"rays": rays, "z_start": z_start, "z_end": z_end, "focus_z": focus_z, "bfd_m": bfd,
+                    "lsa_m": lsa, "front_vertex_z": 0.0, "back_vertex_z": tc,
+                    "note_tr": "Işınlar eksene paralel; her yüzeyde tam (vektörel) Snell yasası uygulandı."
+                               + (" Fresnel için eşdeğer düz-dışbükey yüzey kullanıldı." if p.shape == "fresnel" else "")},
+        "link": link,
+        "meta": {"wavelengthNm": p.wavelengthNm, "n": n},
+    }
+
+
+@app.post("/api/lens/design")
+def lens_design(p: LensDesignParams):
+    try:
+        return coerce_numpy(design_lens_full(p))
+    except ValueError as error:
+        raise _value_error_422(error) from error
+    except Exception as error:
+        raise internal_server_error(error) from error
+
+from backend.lens_stack_api import lens_stack_router  # noqa: E402
+app.include_router(lens_stack_router)

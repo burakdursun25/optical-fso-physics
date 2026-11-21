@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="FSO 6km Optik Veri Aktarım - COMSOL Multiphysics Entegrasyonlu Fizik Motoru Test Sistemi">
-    <title>FSO Fizik Motoru – 6 km Optik Veri Aktarım · COMSOL Entegrasyonu</title>
+    <meta name="description" content="FSO Optik Veri Aktarım - COMSOL Multiphysics Entegrasyonlu Fizik Motoru Test Sistemi">
+    <title>FSO Fizik Motoru – Optik Veri Aktarım · COMSOL Entegrasyonu</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="ui-v2.css">
 </head>
 <body>
 
@@ -15,7 +16,7 @@
             <div class="header-icon">🔬</div>
             <div>
                 <div class="header-title">FSO Fizik Motoru v2.0 – COMSOL Entegrasyonu</div>
-                <div class="header-subtitle">6 km Açık Hava Optik Veri Aktarım · Vektörel Snell Yasası · Beer-Lambert · Cn² Türbülans</div>
+                <div class="header-subtitle" data-dist-tpl="{d} Açık Hava Optik Veri Aktarım · Vektörel Snell Yasası · Beer-Lambert · Cn² Türbülans">6 km Açık Hava Optik Veri Aktarım · Vektörel Snell Yasası · Beer-Lambert · Cn² Türbülans</div>
             </div>
         </div>
         <div style="display: flex; gap: 10px; align-items: center;">
@@ -28,7 +29,7 @@
             </div>
             <div class="header-status">
                 <span class="dot"></span>
-                6 km Menzil
+                <span data-dist-tpl="{d} Menzil">6 km Menzil</span>
             </div>
         </div>
     </header>
@@ -43,7 +44,7 @@
             <div class="control-section animate-in">
                 <div class="section-header">
                     <div class="section-icon blue">🌐</div>
-                    <span class="section-title">Atmosfer Grid (6 km)</span>
+                    <span class="section-title" data-dist-tpl="Atmosfer Grid ({d})">Atmosfer Grid (6 km)</span>
                 </div>
 
                 <div class="control-group">
@@ -216,6 +217,15 @@
                 </div>
             </div>
 
+            <!-- Lens Designer (v2) -->
+            <div class="control-section animate-in-delayed" id="lens-designer-section">
+                <div class="section-header">
+                    <div class="section-icon violet">🔬</div>
+                    <span class="section-title">Lens Tasarımcısı</span>
+                </div>
+                <div id="lens-designer-mount"></div>
+            </div>
+
             <!-- Environment Presets -->
             <div class="control-section animate-in-delayed">
                 <div class="section-header">
@@ -274,7 +284,15 @@
                 <button class="btn btn-primary btn-full" id="btn-run-sim">▶ Simülasyon</button>
                 <button class="btn btn-success btn-full" id="btn-run-test">🧪 Test</button>
             </div>
-            <button class="btn btn-danger btn-full" id="btn-send-data" style="margin-top: -8px;">📡 6 km Veri Gönder</button>
+            <div class="send-opts">
+                <label>Segment (bayt)
+                    <input type="number" id="send-seg-bytes" min="1" max="255" value="4" step="1">
+                </label>
+                <label>Maks. tekrar (≤200)
+                    <input type="number" id="send-max-retries" min="0" max="200" value="20" step="1">
+                </label>
+            </div>
+            <button class="btn btn-danger btn-full" id="btn-send-data" style="margin-top: -8px;" data-dist-tpl="📡 {d} Veri Gönder">📡 6 km Veri Gönder</button>
 
             <!-- COMSOL Export -->
             <div class="control-section" style="border-color: rgba(139,92,246,0.3);">
@@ -389,7 +407,7 @@
                 <div class="canvas-container">
                     <div class="canvas-header">
                         <div class="canvas-title">
-                            🔭 Üstten Görünüm (X-Y) – 6 km
+                            <span data-dist-tpl="🔭 Üstten Görünüm (X-Y) – {d}">🔭 Üstten Görünüm (X-Y) – 6 km</span>
                             <span class="canvas-badge live">LIVE</span>
                         </div>
                         <div class="canvas-legend">
@@ -420,23 +438,48 @@
                 </div>
             </div>
 
+            <!-- v2 panels: 3D propagation, full duplex, ARQ -->
+            <div class="console-panel animate-in-delayed" id="v2-panel">
+                <div class="console-header">
+                    <div class="console-title">🛰️ Yayılım · Full-Duplex · ARQ</div>
+                </div>
+                <div class="v2-body">
+                    <div class="tab-bar" id="v2-tabs">
+                        <button class="tab-btn active" data-tab="prop3d">3B Yayılım</button>
+                        <button class="tab-btn" data-tab="duplex">Full-Duplex İletişim</button>
+                        <button class="tab-btn" data-tab="arq">ARQ Demo</button>
+                    </div>
+                    <div class="v2-tab-pane active" id="v2-pane-prop3d"></div>
+                    <div class="v2-tab-pane" id="v2-pane-duplex"></div>
+                    <div class="v2-tab-pane" id="v2-pane-arq"></div>
+                </div>
+            </div>
+
             <!-- Bit Display -->
             <div class="console-panel animate-in-delayed">
                 <div class="console-header">
-                    <div class="console-title">📡 6 km Veri İletim Görselleştirme</div>
+                    <div class="console-title" data-dist-tpl="📡 {d} Veri İletim Görselleştirme">📡 6 km Veri İletim Görselleştirme</div>
                 </div>
                 <div style="padding: 14px;">
                     <div style="margin-bottom: 12px;">
                         <div class="result-label" style="margin-bottom: 6px;">GÖNDERİLEN BİTLER</div>
                         <div class="bit-display" id="sent-bits">
-                            <span style="color: var(--text-tertiary); font-size: 0.72rem;">Henüz veri gönderilmedi. "📡 6 km Veri Gönder" butonuna basın.</span>
+                            <span style="color: var(--text-tertiary); font-size: 0.72rem;">Henüz veri gönderilmedi. "Veri Gönder" butonuna basın.</span>
                         </div>
                     </div>
                     <div>
-                        <div class="result-label" style="margin-bottom: 6px;">ALINAN BİTLER (6 km sonra)</div>
+                        <div class="result-label" style="margin-bottom: 6px;" data-dist-tpl="ALINAN BİTLER ({d} sonra)">ALINAN BİTLER (6 km sonra)</div>
                         <div class="bit-display" id="recv-bits">
                             <span style="color: var(--text-tertiary); font-size: 0.72rem;">—</span>
                         </div>
+                    </div>
+                    <div id="e2e-panel" class="e2e-panel" hidden>
+                        <div class="e2e-head">
+                            <span class="e2e-badge" id="e2e-badge">—</span>
+                            <span class="e2e-status" id="e2e-status"></span>
+                        </div>
+                        <div class="e2e-totals" id="e2e-totals"></div>
+                        <div class="e2e-rounds" id="e2e-rounds"></div>
                     </div>
                 </div>
             </div>
@@ -525,7 +568,7 @@
             <!-- Link Budget Details -->
             <div class="console-panel animate-in-delayed">
                 <div class="console-header">
-                    <div class="console-title">📊 6 km Link Bütçesi Detayı</div>
+                    <div class="console-title" data-dist-tpl="📊 {d} Link Bütçesi Detayı">📊 6 km Link Bütçesi Detayı</div>
                 </div>
                 <div style="padding: 14px; overflow-x: auto;">
                     <table class="verify-table" id="link-budget-table">
@@ -561,6 +604,11 @@
     <script src="comsol.js"></script>
     <script src="renderer.js"></script>
     <script src="app.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="lens-designer.js"></script>
+    <script src="viz3d.js"></script>
+    <script src="duplex.js"></script>
 
 </body>
 </html>

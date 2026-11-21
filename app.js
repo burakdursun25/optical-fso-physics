@@ -182,6 +182,19 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateTotalDistance() {
         const totalM = parseInt(gridXSlider.value) * parseFloat(cellSizeSlider.value);
         totalDistVal.textContent = (totalM / 1000).toFixed(1) + ' km';
+        updateDistanceLabels(totalM);
+    }
+
+    // Every "6 km" label follows the real link distance (gridX x cellSize).
+    function distLabel() {
+        return (parseInt(gridXSlider.value) * parseFloat(cellSizeSlider.value) / 1000).toFixed(1) + ' km';
+    }
+    function updateDistanceLabels() {
+        const d = distLabel();
+        document.querySelectorAll('[data-dist-tpl]').forEach((el) => {
+            el.textContent = el.getAttribute('data-dist-tpl').replace('{d}', d);
+        });
+        document.title = `FSO Fizik Motoru – ${d} Optik Veri Aktarım · COMSOL Entegrasyonu`;
     }
     updateTotalDistance();
 
@@ -211,6 +224,9 @@ document.addEventListener('DOMContentLoaded', () => {
             lensType: lensTypeEl ? lensTypeEl.value : 'none',
         };
     }
+
+    // v2 modülleri (lens-designer.js, viz3d.js, duplex.js) için köprü
+    window.FSOApp = { log: (type, msg) => log(type, msg), BACKEND_URL, getParams: () => getParams() };
 
     function getLensAdjustedBeam(p) {
         return new LensSystem(p.lensType).applyToBeam({
@@ -517,7 +533,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         log('info', `Link bütçesi: Pₜₓ=<span class="highlight">${lb.P_tx_dBm.toFixed(1)}dBm</span> → Pᵣₓ=<span class="highlight">${lb.P_rx_dBm.toFixed(1)}dBm</span>, Marj: <span class="highlight">${lb.linkMargin_dB.toFixed(1)}dB</span>`);
-        log(lb.linkViable ? 'success' : 'error', lb.linkViable ? '✓ 6 km link aktif – veri iletilebilir' : '✗ Link kopuk – sinyal yetersiz');
+        log(lb.linkViable ? 'success' : 'error', lb.linkViable ? `✓ ${distLabel()} link aktif – veri iletilebilir` : '✗ Link kopuk – sinyal yetersiz');
 
         return lb;
     }
@@ -562,7 +578,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 log('info', `[Python] Ray trace: <span class="highlight">${elapsed}ms</span>, ${currentTrace.steps} adım, ${currentTrace.path.length} path noktası`);
 
                 if (currentTrace.success) {
-                    log('success', `✓ [Python] Işın 6 km sonunda alıcıya ulaştı!`);
+                    log('success', `✓ [Python] Işın ${distLabel()} sonunda alıcıya ulaştı!`);
                     if (currentTrace.exitPosition) {
                         const latDev = Math.sqrt(
                             Math.pow(currentTrace.exitPosition.y - targetPos.y, 2) +
@@ -571,7 +587,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         log('info', `[Python] Yanal sapma: <span class="highlight">${(latDev * 100).toFixed(4)} cm</span> (${latDev < recvR ? '✓ alıcı içinde' : '✗ alıcı dışında'})`);
                     }
                 } else {
-                    log('warn', `✗ [Python] Işın 6 km'de alıcıya ulaşamadı!`);
+                    log('warn', `✗ [Python] Işın ${distLabel()} mesafede alıcıya ulaşamadı!`);
                 }
 
                 log('info', `[Python] Kırılma: <span class="highlight">${currentTrace.refractionEvents.length}</span>, TIR: <span class="highlight">${currentTrace.totalInternalReflections}</span>`);
@@ -636,7 +652,7 @@ document.addEventListener('DOMContentLoaded', () => {
         log('info', `Ray trace: <span class="highlight">${elapsed}ms</span>, ${currentTrace.steps} adım, ${currentTrace.path.length} path noktası`);
 
         if (currentTrace.success) {
-            log('success', `✓ Işın 6 km sonunda alıcıya ulaştı!`);
+            log('success', `✓ Işın ${distLabel()} sonunda alıcıya ulaştı!`);
             if (currentTrace.exitPosition) {
                 const latDev = Math.sqrt(
                     Math.pow(currentTrace.exitPosition.y - targetPos.y, 2) +
@@ -645,7 +661,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 log('info', `Yanal sapma: <span class="highlight">${(latDev * 100).toFixed(4)} cm</span> (${latDev < recvR ? '✓ alıcı içinde' : '✗ alıcı dışında'})`);
             }
         } else {
-            log('warn', `✗ Işın 6 km'de alıcıya ulaşamadı!`);
+            log('warn', `✗ Işın ${distLabel()} mesafede alıcıya ulaşamadı!`);
         }
 
         log('info', `Kırılma: <span class="highlight">${currentTrace.refractionEvents.length}</span>, TIR: <span class="highlight">${currentTrace.totalInternalReflections}</span>`);
@@ -837,14 +853,95 @@ document.addEventListener('DOMContentLoaded', () => {
         return allPassed;
     }
 
+    // ── End-to-end check + retransmission view ───────────────────────
+    let e2eToken = 0;
+    function renderEndToEnd(result, data) {
+        const token = ++e2eToken;
+        const panel = document.getElementById('e2e-panel');
+        const badge = document.getElementById('e2e-badge');
+        const status = document.getElementById('e2e-status');
+        const totals = document.getElementById('e2e-totals');
+        const roundsEl = document.getElementById('e2e-rounds');
+        if (!panel) return;
+        panel.hidden = false;
+        roundsEl.innerHTML = '';
+        totals.innerHTML = '';
+        badge.className = 'e2e-badge pending';
+        badge.textContent = 'uçtan uca CRC: kontrol ediliyor…';
+        const segBits = result.segment_bytes_used * 8;
+        const cells = Array.from(recvBitsEl.children);
+        cells.forEach((c, i) => { if (i % segBits === 0 && i > 0) c.classList.add('seg-gap'); });
+        Array.from(sentBitsEl.children).forEach((c, i) => { if (i % segBits === 0 && i > 0) c.classList.add('seg-gap'); });
+        const fc = result.final_check;
+        const rounds = result.rounds || [];
+        status.textContent = `Veri ${distLabel()} boyunca alıcıya ulaştı; ilk geçişte ${result.first_pass_bit_errors} bit hatalı. Alıcı CRC kontrolü yapıyor…`;
+
+        const setCell = (i, bit, cls) => {
+            const c = cells[i];
+            if (!c) return;
+            c.textContent = bit;
+            c.className = `bit ${cls}${i % segBits === 0 && i > 0 ? ' seg-gap' : ''}`;
+        };
+        const finish = () => {
+            if (token !== e2eToken) return;
+            const ok = fc.ok;
+            badge.className = `e2e-badge ${ok ? 'ok' : 'bad'}`;
+            badge.textContent = `uçtan uca CRC: ${ok ? '✓' : '✗'}  ${fc.message_crc_sent} ${ok ? '=' : '≠'} ${fc.message_crc_received}`;
+            const re = fc.residual_errors;
+            status.textContent = ok
+                ? 'Tüm segmentler doğrulandı; mesaj CRC eşleşti.'
+                : `Tekrar hakkı bitti: ${re.failed_segments} segment doğrulanamadı, ${re.bit_errors} bit hatalı kaldı.`;
+            const eff = (result.efficiency * 100).toFixed(1);
+            totals.innerHTML = `<span>Tur: <b>${result.n_rounds}</b></span><span>Yeniden gönderim: <b>${result.totalRetransmissions}</b></span>` +
+                `<span>Verimlilik: <b>${eff}%</b></span><span>Segment: <b>${result.n_segments}×${result.segment_bytes_used} B</b></span>` +
+                `<span>Maks. tekrar: <b>${result.arq.max_retries}</b></span>` +
+                (result.arq.budget_exhausted ? '<span class="warn">iletim bütçesi doldu</span>' : '');
+            const residual = re.bit_errors;
+            resultBER.textContent = `${(residual / data.length * 100).toFixed(2)}%`;
+            resultBER.className = `result-value ${residual === 0 ? 'emerald' : 'rose'}`;
+            berDetail.textContent = `${data.length - residual}/${data.length} doğru (ilk geçiş: ${data.length - result.first_pass_bit_errors})`;
+        };
+        const retx = rounds.filter((r) => r.kind === 'retransmission');
+        if (!retx.length) { finish(); return; }
+        const delay = Math.max(25, Math.min(700, Math.floor(6000 / retx.length)));
+        let k = 0;
+        const step = () => {
+            if (token !== e2eToken) return;
+            if (k >= retx.length) { finish(); return; }
+            const rd = retx[k++];
+            const fixed = [];
+            rd.became_ok.forEach((seg) => {
+                seg.bits.forEach((b, j) => setCell(seg.bit_start + j, b, 'recv-fix'));
+                fixed.push(seg);
+            });
+            const line = document.createElement('div');
+            line.className = 'e2e-round';
+            line.textContent = `Tur ${rd.round}: ${rd.n_resent} segment yeniden istendi → ${rd.n_became_ok} düzeldi, ${rd.still_failed} bekliyor`;
+            roundsEl.appendChild(line);
+            roundsEl.scrollTop = roundsEl.scrollHeight;
+            status.textContent = `Tur ${rd.round}/${result.n_rounds - 1}: düzeltilen segmentler yerine yerleştiriliyor…`;
+            setTimeout(() => {
+                if (token !== e2eToken) return;
+                fixed.forEach((seg) => seg.bits.forEach((b, j) => setCell(seg.bit_start + j, b, 'recv-ok')));
+            }, Math.floor(delay * 0.8));
+            setTimeout(step, delay);
+        };
+        setTimeout(step, 400);
+    }
+
     // ── Send Data ─────────────────────────────────────────────
     async function sendData() {
         const { sourcePos, targetPos, recvR, params: p } = initSystem();
         const pattern = dataPatternSelect.value;
         const numBits = parseInt(dataBitsSlider.value);
-        const data = DataTransmissionSimulator.generateTestData(pattern, numBits);
+        let data = DataTransmissionSimulator.generateTestData(pattern, numBits);
+        const segInput = document.getElementById('send-seg-bytes');
+        const retInput = document.getElementById('send-max-retries');
+        const segmentBytes = Math.min(255, Math.max(1, Math.round(parseFloat(segInput && segInput.value) || 4)));
+        const maxRetries = Math.min(200, Math.max(0, Math.round(parseFloat(retInput && retInput.value) || 0)));
+        if (retInput && parseFloat(retInput.value) > 200) retInput.value = 200;
 
-        log('info', `6 km veri gönderimi: <span class="highlight">${data.length} bit</span>, desen: <span class="highlight">${pattern}</span>`);
+        log('info', `${distLabel()} veri gönderimi: <span class="highlight">${data.length} bit</span>, desen: <span class="highlight">${pattern}</span>`);
 
         if (usePythonBackend) {
             log('info', `[Python] Veri paketi gönderiliyor...`);
@@ -853,7 +950,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const res = await fetch(`${BACKEND_URL}/api/send-data`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ simParams: p, pattern, numBits })
+                    body: JSON.stringify({ simParams: p, pattern, numBits, useArq: true, segmentBytes, maxRetries })
                 });
                 if (!res.ok) throw new Error(await res.text());
                 const result = await res.json();
@@ -871,6 +968,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 resultBER.className = `result-value ${result.bitErrorRate === 0 ? 'emerald' : result.bitErrorRate < 0.1 ? 'amber' : 'rose'}`;
                 berDetail.textContent = `${result.correctBits}/${result.totalBits} doğru`;
 
+                if (Array.isArray(result.data) && result.data.length) data = result.data;
                 sentBitsEl.innerHTML = '';
                 recvBitsEl.innerHTML = '';
                 for (let i = 0; i < data.length; i++) {
@@ -891,6 +989,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     : result.bitErrorRate < 0.1
                         ? 'linear-gradient(135deg, #f59e0b, #f97316)'
                         : 'var(--gradient-danger)';
+
+                if (result.arq && result.final_check) renderEndToEnd(result, data);
 
                 const lastOneTrace = result.results.filter(r => r.trace).pop();
                 if (lastOneTrace && lastOneTrace.trace) {
@@ -1013,6 +1113,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ── Verify All Snell Events ───────────────────────────────
+    function angleDeg(c) {
+        if (typeof c !== 'number' || !isFinite(c)) return '—';
+        return (Math.acos(Math.min(1, Math.max(-1, c))) * 180 / Math.PI).toFixed(4) + '°';
+    }
     function verifyAllSnellEvents(trace) {
         if (!trace || !trace.refractionEvents.length) return;
         verifyTableBody.innerHTML = '';
@@ -1029,8 +1133,8 @@ document.addEventListener('DOMContentLoaded', () => {
             row.innerHTML = `
                 <td>#${i + 1}</td>
                 <td>${evt.n1.toFixed(6)}</td><td>${evt.n2.toFixed(6)}</td>
-                <td>${(Math.acos(evt.cosTheta_i) * 180 / Math.PI).toFixed(4)}°</td>
-                <td>${(Math.acos(evt.cosTheta_t) * 180 / Math.PI).toFixed(4)}°</td>
+                <td>${angleDeg(evt.cosTheta_i)}</td>
+                <td>${angleDeg(evt.cosTheta_t)}</td>
                 <td>${v.error.toExponential(2)}</td>
                 <td style="color:${v.valid ? 'var(--accent-emerald)' : 'var(--accent-rose)'}">${v.valid ? '✓' : '✗'}</td>
             `;
@@ -1187,7 +1291,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ── Button Event Handlers ─────────────────────────────────
     btnRunSim.addEventListener('click', () => {
-        log('info', '─── 6 km Simülasyon Başlatılıyor ───');
+        log('info', `─── ${distLabel()} Simülasyon Başlatılıyor ───`);
         runSimulation();
     });
 
@@ -1197,12 +1301,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     btnSendData.addEventListener('click', () => {
-        log('info', '─── 6 km Veri İletim Testi ───');
+        log('info', `─── ${distLabel()} Veri İletim Testi ───`);
         sendData();
     });
 
     // ── Boot ──────────────────────────────────────────────────
-    log('info', 'FSO Fizik Motoru v2.0 – 6 km + COMSOL Entegrasyonu');
+    log('info', `FSO Fizik Motoru v2.0 – ${distLabel()} + COMSOL Entegrasyonu`);
     log('info', 'Modüller: Snell Vektörel, Beer-Lambert, Cn² Türbülans, Rytov Scintilasyon');
     log('info', `Yeni: LensSystem (${Object.keys(LensSystem.LENS_TYPES).length} lens), EnvironmentPresets (${Object.keys(EnvironmentPresets.PRESETS).length} ortam)`);
     log('info', 'COMSOL: Java Model, MATLAB LiveLink, CSV Export hazır');

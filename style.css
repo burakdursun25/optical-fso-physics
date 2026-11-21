@@ -862,3 +862,25 @@ canvas {
 .tab-btn:hover:not(.active) {
     color: var(--text-secondary);
 }
+
+/* ── End-to-end CRC check / retransmission view ─────────────── */
+.send-opts { display: flex; gap: 8px; margin: -4px 0 6px; }
+.send-opts label { flex: 1; display: flex; flex-direction: column; gap: 3px; font-size: 0.65rem; color: var(--text-tertiary); }
+.send-opts input { width: 100%; padding: 4px 6px; border-radius: 6px; border: 1px solid rgba(100,116,139,0.3);
+    background: rgba(15,23,42,0.4); color: var(--text-primary, #e2e8f0); font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; }
+.bit.seg-gap { margin-left: 6px; }
+.bit.recv-fix {
+    background: rgba(16, 185, 129, 0.55); color: #fff; border: 1px solid rgba(16, 185, 129, 0.9);
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.5); transform: scale(1.15);
+}
+.e2e-panel { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(100,116,139,0.2); }
+.e2e-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.e2e-badge { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; font-weight: 700; padding: 3px 10px; border-radius: 999px; }
+.e2e-badge.ok { background: rgba(16,185,129,0.2); color: var(--accent-emerald); border: 1px solid rgba(16,185,129,0.5); }
+.e2e-badge.bad { background: rgba(244,63,94,0.2); color: var(--accent-rose); border: 1px solid rgba(244,63,94,0.5); }
+.e2e-badge.pending { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.4); }
+.e2e-status { font-size: 0.68rem; color: var(--text-tertiary); }
+.e2e-totals { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 0.7rem; color: var(--text-secondary, #94a3b8); }
+.e2e-totals .warn { color: #f59e0b; }
+.e2e-rounds { max-height: 110px; overflow-y: auto; margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: var(--text-tertiary); }
+.e2e-round { padding: 1px 0; }

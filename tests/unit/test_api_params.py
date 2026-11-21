@@ -61,6 +61,7 @@ def test_send_data_endpoint_returns_json_safe_zero_bit_results():
         },
         "pattern": "all_zeros",
         "numBits": 2,
+        "useArq": False,
     })
 
     assert response.status_code == 200

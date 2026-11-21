@@ -358,13 +358,14 @@ def vectorialSnellLaw(incident, normal, n1, n2):
         adjustedNormal = n.scale(-1.0)
         adjustedCos = -cosTheta_i
 
-    sin2Theta_i = 1.0 - adjustedCos * adjustedCos
+    adjustedCos = min(1.0, adjustedCos)   # rounding may give 1+eps near normal incidence
+    sin2Theta_i = max(0.0, 1.0 - adjustedCos * adjustedCos)
     sin2Theta_t = ratio * ratio * sin2Theta_i
 
     if sin2Theta_t > 1.0:
         return None  # Total Internal Reflection (TIR)
 
-    cosTheta_t = math.sqrt(1.0 - sin2Theta_t)
+    cosTheta_t = math.sqrt(max(0.0, 1.0 - sin2Theta_t))
     t = i.scale(ratio).add(adjustedNormal.scale(ratio * adjustedCos - cosTheta_t))
 
     return {

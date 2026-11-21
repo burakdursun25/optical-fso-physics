@@ -65,6 +65,30 @@ python scripts/run_test_report.py
 
 Çıktılar `reports/test-results.xml` ve `reports/test_report.md` dosyalarına yazılır.
 
+## Bit kontrolü, optik ve sayısal modüller
+
+- `backend/bitcheck.py`: bit düzeyinde giriş/çıkış doğrulaması. Çerçeve: preamble (0xAA 0xAA) + sync (0x2DD4) + 16 bit uzunluk + yük + CRC-16/CCITT. `compare_bits` BER, 0→1 / 1→0 çevrilmeleri, en uzun hata patlaması ve bayt başına hata haritası verir. Kanal, link bütçesinden (OOK: `BER = 0.5*erfc(sqrt(SNR)/(2*sqrt2))`) türetilen BER ile tohumlu (deterministik) bit çevirir. Kopan kanalda tüm bitler "kayıp" sayılır (sessiz sıfır olarak doğru sayılmaz).
+- `backend/optics.py`: ABCD matrisleri, Gauss ışını, lens ön ayarları ve `lens_link_budget`.
+- `backend/numerics.py`: integral (trapezoid, Simpson, Romberg, Gauss-Legendre), ODE (Euler, RK4, RK45), türev ve yakınsama analizi.
+
+Yeni API uç noktaları:
+
+- `POST /api/bitcheck`: metin yükü, mesafe, lens ön ayarı ve seed ile uçtan uca bit/CRC raporu
+- `GET /api/optics/presets`: lens ön ayarları listesi
+- `POST /api/optics/link-gain`: mesafe listesi için lens kazancı / link bütçesi
+- `POST /api/numerics/convergence`: izin verilen yöntemlerle (trapezoid, simpson, gauss_legendre, euler, rk4) hata tablosu ve yakınsama mertebesi
+
+## Grafikler
+
+Grafikler için matplotlib gerekir (`pip install -r requirements-dev.txt`):
+
+```bash
+python3 scripts/generate_test_plots.py   # reports/figures/*.png dosyalarını üretir
+python3 scripts/run_test_report.py       # testleri çalıştırır, grafikleri ve bit kontrol tablosunu test_report.md içine ekler
+```
+
+Üretilen şekiller: BER-mesafe, lens kazancı, ışın yarıçapı w(z), sayısal yakınsama (log-log), bit I/O zaman çizelgesi, hata konumu haritası ve test sonuç özeti. matplotlib yoksa rapor yine üretilir, sadece şekiller atlanır.
+
 ## Rapor
 
 CRC doğrulama sonuçları ve proje değerlendirmesi `reports/optical_fso_crc_report.md` dosyasında, PDF çıktısı ise aynı klasörde bulunur.
