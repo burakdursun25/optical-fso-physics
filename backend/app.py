@@ -1,18 +1,20 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import logging
-from pydantic import BaseModel, Field, model_validator
-from typing import Any, Dict, List, Literal, Optional
 import math
 import os
+from typing import Any, Dict, List, Literal, Optional
+
+import numpy as np
+from pydantic import BaseModel, Field, model_validator
 
 from backend.engine import (Vec3, AtmosphereGrid, RayTracer, DataTransmissionSimulator,
                              AtmosphericLoss, vectorialSnellLaw, verifySnellLaw,
                              LensSystem, EnvironmentPresets, ComprehensiveTransmissionTest)
 from backend.comsol import COMSOLBridge
 from backend import bitcheck, numerics, optics, materials
+from backend.lens_stack import _surface_hit, _refract
 
 app = FastAPI(title="FSO Physics Engine Backend")
 logger = logging.getLogger(__name__)
@@ -65,8 +67,8 @@ class SimParams(BaseModel):
     beamDivRad: float = Field(0.001, ge=0.0, le=1.0)
     # Lens system
     lensType: Literal["none", "collimating", "focusing", "galilean_telescope", "cassegrain", "diverging"] = "none"
-    lensFocalLength_m: Optional[float] = None
-    lensAperture_m: Optional[float] = None
+    lensFocalLength_m: Optional[float] = Field(None, ge=-100.0, le=100.0)
+    lensAperture_m: Optional[float] = Field(None, gt=0.0, le=10.0)
     # Environment preset (if set, overrides thermal/weather/Cn2 params)
     environmentPreset: Optional[Literal["urban", "maritime", "desert", "mountain", "industrial", "arctic", "storm"]] = None
 
@@ -101,26 +103,36 @@ class TransmissionTestParams(BaseModel):
     @model_validator(mode="after")
     def validate_grid(self):
         validate_grid_limits(self.gridX, self.gridY, self.gridZ, self.cellSize)
+        total_cells = self.gridX * self.gridY * self.gridZ * len(EnvironmentPresets.PRESETS)
+        if total_cells > MAX_GRID_CELLS:
+            raise ValueError(f"transmission test grids exceed the {MAX_GRID_CELLS} combined cell limit")
         return self
 
 
 # ── Serialization Helpers ─────────────────────────────────────
 def coerce_numpy(obj):
-    import numpy as np
+    t = type(obj)
+    if obj is None or t in (int, float, bool, str):
+        return obj
+    if t is dict:
+        return {k: coerce_numpy(v) for k, v in obj.items()}
+    if t is list:
+        return [coerce_numpy(x) for x in obj]
+    if t is tuple:
+        return tuple(coerce_numpy(x) for x in obj)
+    if isinstance(obj, (np.floating, float)):
+        return float(obj)
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if isinstance(obj, (np.integer, int)):
+        return int(obj)
     if isinstance(obj, dict):
         return {k: coerce_numpy(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
+    if isinstance(obj, list):
         return [coerce_numpy(x) for x in obj]
-    elif isinstance(obj, tuple):
+    if isinstance(obj, tuple):
         return tuple(coerce_numpy(x) for x in obj)
-    elif isinstance(obj, (np.floating, float)):
-        return float(obj)
-    elif isinstance(obj, (np.bool_, bool)):
-        return bool(obj)
-    elif isinstance(obj, (np.integer, int)):
-        return int(obj)
-    else:
-        return obj
+    return obj
 
 def serialize_vec3(v: Vec3) -> Dict[str, float]:
     return {"x": v.x, "y": v.y, "z": v.z}
@@ -336,10 +348,6 @@ def _send_data_end_to_end(params, p, trace, link_budget, sourcePos, targetPos, r
     e2e = arq_mod.run_end_to_end(data, params.segmentBytes, params.maxRetries, channel, 0.0, params.seed)
     first = e2e["first_pass_bits"]
     for i, r in enumerate(serialized_results):
-        if i < len(serialized_results) - 1:
-            r["trace"] = None      # identical ray path for every bit: ship it once (last entry)
-            if len(serialized_results) > 512:
-                r["linkBudget"] = None     # likewise the (identical) link budget, for big messages
         r["received"] = first[i]
         r["correct"] = first[i] == data[i]
     correct = sum(1 for a, b in zip(data, first) if a == b)
@@ -386,22 +394,23 @@ def send_data(params: SendDataParams):
 
         results = simulator.sendPacket(data)
 
-        # Serialize Vec3 elements inside the result trace
-        serialized_results = []
-        for r in results["results"]:
-            res_dict = {
+        # Serialize shared ray trace once and attach only to the last entry to prevent O(N) payload bloat
+        raw_results = results["results"]
+        last_idx = len(raw_results) - 1
+        serialized_trace = serialize_trace(trace) if trace else None
+        compact_lb = len(raw_results) > 512
+        serialized_results = [
+            {
                 "sent": r["sent"],
                 "received": r["received"],
                 "correct": r["correct"],
                 "lateralDeviation": r["lateralDeviation"],
                 "signalPower": r["signalPower"],
-                "linkBudget": r["linkBudget"]
+                "linkBudget": None if (compact_lb and i < last_idx) else r["linkBudget"],
+                "trace": serialized_trace if (i == last_idx and r.get("trace")) else None,
             }
-            if r.get("trace"):
-                res_dict["trace"] = serialize_trace(r["trace"])
-            else:
-                res_dict["trace"] = None
-            serialized_results.append(res_dict)
+            for i, r in enumerate(raw_results)
+        ]
 
         res = {
             "data": results["data"],
@@ -436,8 +445,9 @@ def run_tests():
         result = vectorialSnellLaw(i, n, 1.0, 1.5)
         pass_t1 = result is not None and abs(result["direction"].z - (-1.0)) < 1e-6
         test_results.append({"name": "T1 – Normal geliş (θi=0°)", "pass": pass_t1, "error": ""})
-    except Exception as e:
-        test_results.append({"name": "T1 – Normal geliş (θi=0°)", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T1 – Normal geliş (θi=0°)", "pass": False, "error": "test hatası"})
 
     # Test 2: Air→Glass 30°
     try:
@@ -449,8 +459,9 @@ def run_tests():
         actualSin = math.sqrt(1.0 - result["cosTheta_t"] * result["cosTheta_t"])
         pass_t2 = abs(actualSin - expectedSin) < 1e-10
         test_results.append({"name": "T2 – Hava→Cam (30°)", "pass": pass_t2, "error": f"hata={abs(actualSin - expectedSin):.3e}"})
-    except Exception as e:
-        test_results.append({"name": "T2 – Hava→Cam (30°)", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T2 – Hava→Cam (30°)", "pass": False, "error": "test hatası"})
 
     # Test 3: TIR
     try:
@@ -460,8 +471,9 @@ def run_tests():
         result = vectorialSnellLaw(i, Vec3(0, 0, 1), 1.5, 1.0)
         pass_t3 = result is None
         test_results.append({"name": "T3 – TIR (θ>41.8°)", "pass": pass_t3, "error": ""})
-    except Exception as e:
-        test_results.append({"name": "T3 – TIR (θ>41.8°)", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T3 – TIR (θ>41.8°)", "pass": False, "error": "test hatası"})
 
     # Test 4: Atmosphere boundary (6 km realistic delta n)
     try:
@@ -471,8 +483,9 @@ def run_tests():
         result = vectorialSnellLaw(i, Vec3(-1, 0, 0), n1, n2)
         verify = verifySnellLaw(n1, n2, result["cosTheta_i"], result["cosTheta_t"])
         test_results.append({"name": "T4 – Atmosfer sınırı (Δn=-2.3e-5)", "pass": verify["valid"], "error": f"hata={verify['error']:.3e}"})
-    except Exception as e:
-        test_results.append({"name": "T4 – Atmosfer sınırı (Δn=-2.3e-5)", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T4 – Atmosfer sınırı (Δn=-2.3e-5)", "pass": False, "error": "test hatası"})
 
     # Test 5: Reciprocity
     try:
@@ -485,8 +498,9 @@ def run_tests():
         error = math.sqrt(math.pow(recovered.x - i.x, 2) + math.pow(recovered.y - i.y, 2) + math.pow(recovered.z - i.z, 2))
         pass_t5 = error < 1e-10
         test_results.append({"name": "T5 – Tersinirlik", "pass": pass_t5, "error": f"hata={error:.3e}"})
-    except Exception as e:
-        test_results.append({"name": "T5 – Tersinirlik", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T5 – Tersinirlik", "pass": False, "error": "test hatası"})
 
     # Test 6: Tangential conservation
     try:
@@ -499,8 +513,9 @@ def run_tests():
         t_tan = result["direction"].sub(n.scale(result["direction"].dot(n)))
         pass_t6 = abs(n1 * i_tan.length() - n2 * t_tan.length()) < 1e-10
         test_results.append({"name": "T6 – Teğetsel korunum", "pass": pass_t6, "error": ""})
-    except Exception as e:
-        test_results.append({"name": "T6 – Teğetsel korunum", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T6 – Teğetsel korunum", "pass": False, "error": "test hatası"})
 
     # Test 7: Angle sweep with atmosphere indices
     try:
@@ -516,8 +531,9 @@ def run_tests():
                 if not v["valid"]:
                     sweepPass = False
         test_results.append({"name": "T7 – Açı tarama (0°-85°)", "pass": sweepPass, "error": ""})
-    except Exception as e:
-        test_results.append({"name": "T7 – Açı tarama (0°-85°)", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T7 – Açı tarama (0°-85°)", "pass": False, "error": "test hatası"})
 
     # Test 8: Beer-Lambert absorption (6 km clear)
     try:
@@ -525,8 +541,9 @@ def run_tests():
         expectedLoss_dB = 0.2 * 6.0
         pass_t8 = abs(loss["loss_dB"] - expectedLoss_dB) < 0.5
         test_results.append({"name": "T8 – Beer-Lambert 6km clear", "pass": pass_t8, "error": f"{loss['loss_dB']:.2f} dB (beklenen ~{expectedLoss_dB:.1f} dB)"})
-    except Exception as e:
-        test_results.append({"name": "T8 – Beer-Lambert 6km clear", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T8 – Beer-Lambert 6km clear", "pass": False, "error": "test hatası"})
 
     # Test 9: Geometric loss at 6 km
     try:
@@ -534,8 +551,9 @@ def run_tests():
         expectedBeamDiam = 0.004 + 2.0 * 0.001 * 6000.0
         pass_t9 = abs(geo["beamDiamAtReceiver"] - expectedBeamDiam) < 0.01
         test_results.append({"name": "T9 – Geometrik yayılma 6km", "pass": pass_t9, "error": f"Ø={geo['beamDiamAtReceiver']:.2f}m (beklenen ~{expectedBeamDiam:.2f}m)"})
-    except Exception as e:
-        test_results.append({"name": "T9 – Geometrik yayılma 6km", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T9 – Geometrik yayılma 6km", "pass": False, "error": "test hatası"})
 
     # Test 10: Edlén equation verification
     try:
@@ -544,16 +562,18 @@ def run_tests():
         n_35C = atm.refractiveIndexSimple(35.0, 101325.0)
         pass_t10 = n_15C > n_35C and abs(n_15C - 1.000293) < 1e-5
         test_results.append({"name": "T10 – Edlén", "pass": pass_t10, "error": f"n(15°C)={n_15C:.8f}, n(35°C)={n_35C:.8f}"})
-    except Exception as e:
-        test_results.append({"name": "T10 – Edlén", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T10 – Edlén", "pass": False, "error": "test hatası"})
 
     # Test 11: Scintillation index
     try:
         scint = AtmosphericLoss.scintillationIndex(6000.0, 1e-15, 1550e-9)
         pass_t11 = scint["sigma2_R"] > 0 and not math.isnan(scint["sigma2_R"])
         test_results.append({"name": "T11 – Rytov scintilasyon", "pass": pass_t11, "error": f"σ²ᵣ={scint['sigma2_R']:.3e} ({scint['regime']})"})
-    except Exception as e:
-        test_results.append({"name": "T11 – Rytov scintilasyon", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T11 – Rytov scintilasyon", "pass": False, "error": "test hatası"})
 
     # Test 12: LensSystem – Collimating lens reduces divergence
     try:
@@ -562,8 +582,9 @@ def run_tests():
         pass_t12 = result_beam["divergenceRad"] < 1e-3 and result_beam["receiverDiamM"] > 0.1
         test_results.append({"name": "T12 – Kollimating lens diverjans azaltma", "pass": pass_t12,
                              "error": f"div={result_beam['divergenceRad']:.2e} rad, recvR={result_beam['receiverDiamM']:.4f}m"})
-    except Exception as e:
-        test_results.append({"name": "T12 – Kollimating lens diverjans azaltma", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T12 – Kollimating lens diverjans azaltma", "pass": False, "error": "test hatası"})
 
     # Test 13: LensSystem – Cassegrain gives highest gain
     try:
@@ -574,8 +595,9 @@ def run_tests():
         pass_t13 = gain_cas > gain_none
         test_results.append({"name": "T13 – Cassegrain en yüksek kazanç", "pass": pass_t13,
                              "error": f"Cassegrain={gain_cas:.1f}dB > None={gain_none:.1f}dB"})
-    except Exception as e:
-        test_results.append({"name": "T13 – Cassegrain en yüksek kazanç", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T13 – Cassegrain en yüksek kazanç", "pass": False, "error": "test hatası"})
 
     # Test 14: EnvironmentPresets – all presets load correctly
     try:
@@ -587,8 +609,9 @@ def run_tests():
                 all_presets_ok = False
         test_results.append({"name": "T14 – Ortam presetleri geçerli", "pass": all_presets_ok,
                              "error": f"{len(EnvironmentPresets.get_preset_keys())} preset yüklendi"})
-    except Exception as e:
-        test_results.append({"name": "T14 – Ortam presetleri geçerli", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T14 – Ortam presetleri geçerli", "pass": False, "error": "test hatası"})
 
     # Test 15: ComprehensiveTransmissionTest – successRate in [0,100]
     try:
@@ -603,8 +626,9 @@ def run_tests():
         worst = min(results_matrix, key=lambda x: x["successRate"]) if results_matrix else None
         detail = f"{total_combos} kombinasyon, En iyi: {best['successRate']}% ({best['environment']}/{best['lens']}), En kötü: {worst['successRate']}%" if best else ""
         test_results.append({"name": "T15 – Kapsamlı veri aktarım testi", "pass": pass_t15, "error": detail})
-    except Exception as e:
-        test_results.append({"name": "T15 – Kapsamlı veri aktarım testi", "pass": False, "error": str(e)})
+    except Exception:
+        logger.exception("Built-in smoke check failed")
+        test_results.append({"name": "T15 – Kapsamlı veri aktarım testi", "pass": False, "error": "test hatası"})
 
     all_passed = all(tr["pass"] for tr in test_results)
     return coerce_numpy({
@@ -1196,49 +1220,6 @@ class LensDesignParams(BaseModel):
     bareRxRadiusM: float = Field(0.0125, gt=0.0, le=10.0)
     nPoints: int = Field(81, ge=41, le=401)
     nRays: int = Field(9, ge=3, le=21)
-
-
-def _surface_hit(z0: float, y0: float, dz: float, dy: float, vz: float, R: float, k: float):
-    """Intersect the ray (z0,y0)+t(dz,dy) with the conic surface z = vz + sag(R,k;y).
-    Returns (z, y, nz, ny) with the unit surface normal pointing to +z, or None."""
-    def sag(y):
-        return materials._sag(R, y, k)
-
-    def dsag(y):
-        if math.isinf(R):
-            return 0.0
-        c = 1.0 / R
-        return c * y / math.sqrt(max(1e-18, 1.0 - (1.0 + k) * c * c * y * y))
-
-    z = vz
-    for _ in range(60):                    # Newton on g(z) = z - vz - sag(y(z))
-        y = y0 + (dy / dz) * (z - z0)
-        g = z - vz - sag(y)
-        gp = 1.0 - dsag(y) * (dy / dz)
-        if abs(gp) < 1e-12:
-            return None
-        z_new = z - g / gp
-        if abs(z_new - z) < 1e-14:
-            z = z_new
-            break
-        z = z_new
-    y = y0 + (dy / dz) * (z - z0)
-    s = dsag(y)
-    norm = math.hypot(1.0, s)
-    return z, y, 1.0 / norm, -s / norm
-
-
-def _refract(dz: float, dy: float, nz: float, ny: float, n1: float, n2: float):
-    """Vector Snell law in 2D; returns the new unit direction or None (total internal reflection)."""
-    cosi = dz * nz + dy * ny
-    if cosi < 0:
-        nz, ny, cosi = -nz, -ny, -cosi
-    r = n1 / n2
-    kk = 1.0 - r * r * (1.0 - cosi * cosi)
-    if kk < 0:
-        return None
-    t = r * cosi - math.sqrt(kk)
-    return r * dz - t * nz, r * dy - t * ny
 
 
 def _trace_ray(y_in: float, z_start: float, vz2: float, R1: float, R2: float, k2: float, n: float):

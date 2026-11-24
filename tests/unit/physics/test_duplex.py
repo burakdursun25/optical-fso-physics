@@ -76,7 +76,7 @@ def test_clean_link_delivers_both_payloads_exactly_and_reports_rates():
     assert s["both_delivered"] and not s["timed_out"]
     assert d[AB]["arq_result"]["delivered_payload"] == "Terminal A -> B: merhaba FSO!"
     assert d[BA]["arq_result"]["delivered_payload"] == "Terminal B -> A: selam!"
-    assert s["total_time_s"] == pytest.approx(s["total_slots"] * (8 + 7) * 8 / 1e9)
+    assert s["total_time_s"] == pytest.approx(s["total_slots"] * (8 + 9) * 8 / 1e9)
     for k in (AB, BA):
         assert 0 < d[k]["goodput_bps"] <= d[k]["throughput_bps"] <= 1e9
         assert d[k]["arq_result"]["piggybacked_feedback"] is True

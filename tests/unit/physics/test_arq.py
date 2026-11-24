@@ -20,7 +20,7 @@ def test_zero_ber_means_zero_retries_and_perfect_delivery():
     assert r["residual_errors"] == {"failed_segments": 0, "lost_bytes": 0, "undetected_segments": 0,
                                     "bit_errors": 0}
     assert r["efficiency"] == 1.0
-    assert r["goodput_ratio"] == pytest.approx(len(TEXT.encode()) / (len(TEXT.encode()) + 5 * n))
+    assert r["goodput_ratio"] == pytest.approx(len(TEXT.encode()) / (len(TEXT.encode()) + arq.SEG_OVERHEAD_BYTES * n))
     assert r["retries_histogram"] == {"0": n} and set(r["retries_per_region"].values()) == {0}
 
 

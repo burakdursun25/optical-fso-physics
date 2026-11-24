@@ -8,16 +8,16 @@ Free-space optical (FSO) haberleşme bağlantılarını fiziksel bir model üzer
 - 3B vektörler, ışın izleme ve Snell kırılma yasası
 - Lens ve ortam preset'leri
 - Veri iletim simülasyonu ve pointing loss
-- Paket bütünlüğü için CRC-16/CCITT-FALSE hesaplama ve doğrulama
+- Paket bütünlüğü için CRC-32 (IEEE 802.3) hesaplama ve doğrulama
 - Fizik ve veri doğrulama testleri
 - COMSOL entegrasyonu için yardımcı modüller
 - Tarayıcı tabanlı arayüz için JavaScript/CSS dosyaları
 
 ## CRC doğrulaması
 
-`backend/engine.py` içindeki `crc16_ccitt` fonksiyonu, UTF-8 metin veya byte tabanlı payload üzerinden CRC-16/CCITT-FALSE checksum üretir. `validate_crc` ise alınan checksum'ın payload ile eşleşip eşleşmediğini kontrol eder.
+`backend/engine.py` içindeki `crc32` fonksiyonu, UTF-8 metin veya byte tabanlı payload üzerinden CRC-32 (IEEE 802.3 / ISO-HDLC: polinom 0x04C11DB7, yansıtılmış 0xEDB88320, başlangıç 0xFFFFFFFF, giriş/çıkış yansıtmalı, son XOR 0xFFFFFFFF) checksum üretir; tablo tabanlı, açık bir uygulamadır. `validate_crc32` alınan checksum'ın payload ile eşleşip eşleşmediğini kontrol eder. Eski `crc16_ccitt` / `validate_crc` yalnızca geriye dönük uyumluluk için durur; proje artık hiçbir yerde CRC-16 kullanmaz.
 
-Bu yaklaşım, optik bağlantı üzerinden taşınan bir veri paketinin fiziksel iletim hesabından sonra bozulup bozulmadığını kontrol etmeye yarar. Uygulamadaki sonuç `binascii.crc_hqx(payload, 0xFFFF)` ile uyumlu olacak şekilde test edilir.
+Bu yaklaşım, optik bağlantı üzerinden taşınan bir veri paketinin fiziksel iletim hesabından sonra bozulup bozulmadığını kontrol etmeye yarar. Uygulamadaki sonuç `zlib.crc32(payload)` / `binascii.crc32(payload)` ile birebir aynı olacak şekilde test edilir (`"123456789"` için kontrol değeri `0xCBF43926`). CRC alanları arayüzde 8 onaltılık basamakla (ör. `CBF43926`) gösterilir.
 
 ## Kurulum
 
@@ -67,7 +67,7 @@ python scripts/run_test_report.py
 
 ## Bit kontrolü, optik ve sayısal modüller
 
-- `backend/bitcheck.py`: bit düzeyinde giriş/çıkış doğrulaması. Çerçeve: preamble (0xAA 0xAA) + sync (0x2DD4) + 16 bit uzunluk + yük + CRC-16/CCITT. `compare_bits` BER, 0→1 / 1→0 çevrilmeleri, en uzun hata patlaması ve bayt başına hata haritası verir. Kanal, link bütçesinden (OOK: `BER = 0.5*erfc(sqrt(SNR)/(2*sqrt2))`) türetilen BER ile tohumlu (deterministik) bit çevirir. Kopan kanalda tüm bitler "kayıp" sayılır (sessiz sıfır olarak doğru sayılmaz).
+- `backend/bitcheck.py`: bit düzeyinde giriş/çıkış doğrulaması. Çerçeve: preamble (0xAA 0xAA) + sync (0x2DD4) + 16 bit uzunluk + yük + CRC-32. `compare_bits` BER, 0→1 / 1→0 çevrilmeleri, en uzun hata patlaması ve bayt başına hata haritası verir. Kanal, link bütçesinden (OOK: `BER = 0.5*erfc(sqrt(SNR)/(2*sqrt2))`) türetilen BER ile tohumlu (deterministik) bit çevirir. Kopan kanalda tüm bitler "kayıp" sayılır (sessiz sıfır olarak doğru sayılmaz).
 - `backend/optics.py`: ABCD matrisleri, Gauss ışını, lens ön ayarları ve `lens_link_budget`.
 - `backend/numerics.py`: integral (trapezoid, Simpson, Romberg, Gauss-Legendre), ODE (Euler, RK4, RK45), türev ve yakınsama analizi.
 

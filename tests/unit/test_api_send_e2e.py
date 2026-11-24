@@ -137,3 +137,12 @@ def test_deterministic_for_seed():
     a = _send(cell=300.0, seed=9, pattern="alternating")
     b = _send(cell=300.0, seed=9, pattern="alternating")
     assert a["first_pass_bits"] == b["first_pass_bits"] and a["n_rounds"] == b["n_rounds"]
+
+
+def test_send_data_final_check_uses_32bit_crc():
+    import re
+    b = _send()
+    fc = b["final_check"]
+    assert fc["crc_algorithm"].startswith("CRC-32")
+    assert re.fullmatch(r"[0-9A-F]{8}", fc["message_crc_sent"])
+    assert fc["message_crc_sent"] == fc["message_crc_received"] and fc["ok"]

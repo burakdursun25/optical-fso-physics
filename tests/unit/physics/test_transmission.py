@@ -1,4 +1,7 @@
+import binascii
 import math
+import random
+import zlib
 
 from backend.engine import (
     AtmosphericLoss,
@@ -7,16 +10,60 @@ from backend.engine import (
     LensSystem,
     Vec3,
     crc16_ccitt,
+    crc32,
     validate_crc,
+    validate_crc32,
 )
 
 
-def test_crc16_matches_ccitt_false_round_trip():
+def test_legacy_crc16_still_available_and_unchanged():
     payload = b"OPTICAL-FSO-CRC"
     checksum = crc16_ccitt(payload)
 
+    assert checksum <= 0xFFFF and crc16_ccitt(b"123456789") == 0x29B1
     assert validate_crc(payload, checksum)
     assert not validate_crc(payload, checksum ^ 0x1234)
+
+
+def test_crc32_check_value_and_round_trip():
+    assert crc32(b"123456789") == 0xCBF43926
+    assert crc32(b"") == 0
+    payload = b"OPTICAL-FSO-CRC"
+    checksum = crc32(payload)
+    assert validate_crc32(payload, checksum)
+    assert not validate_crc32(payload, checksum ^ 0x12345678)
+
+
+def test_crc32_matches_zlib_random_and_turkish_utf8():
+    rng = random.Random(7)
+    for n in (1, 2, 7, 64, 1000):
+        data = bytes(rng.randrange(256) for _ in range(n))
+        assert crc32(data) == zlib.crc32(data) == binascii.crc32(data)
+    text = "Işık, şimşek ve ğüzel çöl — İstanbul'da optik bağlantı"
+    assert crc32(text) == zlib.crc32(text.encode("utf-8"))
+
+
+def test_crc32_detects_every_single_bit_flip():
+    data = bytes(range(40))
+    ref = crc32(data)
+    for i in range(len(data) * 8):
+        bad = bytearray(data)
+        bad[i // 8] ^= 1 << (i % 8)
+        assert crc32(bytes(bad)) != ref
+
+
+def test_crc32_detects_all_bursts_up_to_32_bits():
+    rng = random.Random(11)
+    data = bytes(rng.randrange(256) for _ in range(48))
+    ref = crc32(data)
+    nbits = len(data) * 8
+    for _ in range(3000):
+        length = rng.randint(1, 32)
+        start = rng.randrange(nbits - length + 1)
+        pattern = (rng.getrandbits(length) | 1 | (1 << (length - 1))) if length > 1 else 1
+        mask = pattern << (nbits - start - length)   # burst: first and last bit of the span flipped
+        bad = (int.from_bytes(data, "big") ^ mask).to_bytes(len(data), "big")
+        assert crc32(bad) != ref
 
 
 def test_lens_system_improves_collimation_and_aperture():

@@ -5,7 +5,7 @@ import random
 import pytest
 
 from backend import bitcheck as bc
-from backend.engine import crc16_ccitt
+from backend.engine import crc32
 
 
 def test_bits_bytes_roundtrip_msb_first():
@@ -19,7 +19,7 @@ def test_bits_bytes_roundtrip_msb_first():
 
 def test_frame_build_parse_roundtrip():
     frame = bc.build_frame(b"FSO link")
-    assert len(frame) == (bc.HEADER_BYTES + 8 + 2) * 8
+    assert len(frame) == (bc.HEADER_BYTES + 8) * 8 + bc.CRC_BITS
     assert bc.bits_to_bytes(frame[:16]) == bc.PREAMBLE
     parsed = bc.parse_frame(frame)
     assert parsed["crc_ok"] and parsed["sync_ok"]
@@ -49,10 +49,11 @@ def test_parse_reports_truncation_and_sync_errors():
     assert not p["sync_ok"] and p["sync_bit_errors"] == 1 and not p["crc_ok"]
 
 
-def test_frame_crc_uses_engine_crc16():
+def test_frame_crc_uses_engine_crc32():
     frame = bc.build_frame(b"xyz")
-    crc = bc.bits_to_bytes(frame[-16:])
-    assert int.from_bytes(crc, "big") == crc16_ccitt(b"\x00\x03xyz")
+    crc = bc.bits_to_bytes(frame[-32:])
+    assert int.from_bytes(crc, "big") == crc32(b"\x00\x03xyz")
+    assert len(frame) == (2 + 2 + 2 + 3 + 4) * 8
 
 
 def test_compare_bits_hand_made_case():
@@ -148,3 +149,14 @@ def test_dropped_channel_counts_all_bits_lost():
 
 def test_lens_improves_link_over_bare_beam():
     assert bc.link_ber("keplerian_telescope", 6000) < bc.link_ber("none", 6000)
+
+
+def test_frame_build_parse_roundtrip_32bit_crc():
+    for payload in (b"", b"a", "Işık şimşek ğ".encode("utf-8"), bytes(range(256))):
+        p = bc.parse_frame(bc.build_frame(payload))
+        assert p["crc_ok"] and p["payload"] == payload
+        assert p["crc_received"] == p["crc_computed"] <= 0xFFFFFFFF
+    frame = bc.build_frame(b"hello")
+    bad = list(frame)
+    bad[-5] ^= 1   # flip a bit inside the 32-bit CRC field
+    assert not bc.parse_frame(bad)["crc_ok"]

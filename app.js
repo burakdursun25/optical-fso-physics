@@ -139,19 +139,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ── Logger ────────────────────────────────────────────────
+    const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const logLines = [];
-    function log(type, msg) {
+    function log(type, msg, trustedHtml = true) {
+        const safeType = /^(info|warn|error|success|test)$/.test(type) ? type : 'info';
         const now = new Date();
         const time = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-        logLines.push({ time, type, msg });
+        logLines.push({ time, type: safeType, msg });
         if (logLines.length > 300) logLines.shift();
 
         const line = document.createElement('div');
         line.className = 'log-line';
         line.innerHTML = `
             <span class="log-time">${time}</span>
-            <span class="log-type ${type}">[${type.toUpperCase()}]</span>
-            <span class="log-msg">${msg}</span>
+            <span class="log-type ${safeType}">[${safeType.toUpperCase()}]</span>
+            <span class="log-msg">${trustedHtml ? msg : escHtml(msg)}</span>
         `;
         consoleBody.appendChild(line);
         consoleBody.scrollTop = consoleBody.scrollHeight;
@@ -226,7 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // v2 modülleri (lens-designer.js, viz3d.js, duplex.js) için köprü
-    window.FSOApp = { log: (type, msg) => log(type, msg), BACKEND_URL, getParams: () => getParams() };
+    window.FSOApp = { log: (type, msg) => log(type, msg, false), BACKEND_URL, getParams: () => getParams() };
 
     function getLensAdjustedBeam(p) {
         return new LensSystem(p.lensType).applyToBeam({
@@ -365,14 +367,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td style="font-size:0.7rem">${r.envName}</td>
-                <td style="font-size:0.7rem">${r.lensName}</td>
-                <td style="color:${color}; font-weight:700">${rate}%${bar}</td>
-                <td>${r.correctBits}/${r.totalBits}</td>
-                <td style="color:${r.lensGain_dB >= 0 ? 'var(--accent-emerald)' : 'var(--accent-rose)'}">${gainStr} dB</td>
-                <td>${weatherEmoji[r.weather] || r.weather}</td>
-                <td style="color:${cn2Color[r.Cn2Level] || 'inherit'}">${r.Cn2Level}</td>
-                <td>${prx} dBm</td>
+                <td style="font-size:0.7rem">${escHtml(r.envName)}</td>
+                <td style="font-size:0.7rem">${escHtml(r.lensName)}</td>
+                <td style="color:${color}; font-weight:700">${escHtml(rate)}%${bar}</td>
+                <td>${escHtml(r.correctBits)}/${escHtml(r.totalBits)}</td>
+                <td style="color:${r.lensGain_dB >= 0 ? 'var(--accent-emerald)' : 'var(--accent-rose)'}">${escHtml(gainStr)} dB</td>
+                <td>${escHtml(weatherEmoji[r.weather] || r.weather)}</td>
+                <td style="color:${cn2Color[r.Cn2Level] || 'inherit'}">${escHtml(r.Cn2Level)}</td>
+                <td>${escHtml(prx)} dBm</td>
                 <td>${viable}</td>
             `;
             tbody.appendChild(tr);
@@ -418,7 +420,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     results = data.results;
                     log('info', `[Python Backend] ${data.summary.totalCombinations} kombinasyon test edildi`);
                 } catch (e) {
-                    log('warn', `Backend test hatası: ${e.message}. JS Fallback kullanılıyor.`);
+                    log('warn', `Backend test hatası: ${e.message}. JS Fallback kullanılıyor.`, false);
                 }
             }
 
@@ -528,7 +530,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         rows.forEach(([param, val, unit, desc]) => {
             const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${param}</td><td style="font-family:'JetBrains Mono',monospace;color:var(--accent-cyan)">${val}</td><td>${unit}</td><td style="color:var(--text-tertiary)">${desc}</td>`;
+            tr.innerHTML = `<td>${escHtml(param)}</td><td style="font-family:'JetBrains Mono',monospace;color:var(--accent-cyan)">${escHtml(val)}</td><td>${escHtml(unit)}</td><td style="color:var(--text-tertiary)">${escHtml(desc)}</td>`;
             linkBudgetBody.appendChild(tr);
         });
 
@@ -629,7 +631,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ];
                 rows.forEach(([param, val, unit, desc]) => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${param}</td><td style="font-family:'JetBrains Mono',monospace;color:var(--accent-cyan)">${val}</td><td>${unit}</td><td style="color:var(--text-tertiary)">${desc}</td>`;
+                    tr.innerHTML = `<td>${escHtml(param)}</td><td style="font-family:'JetBrains Mono',monospace;color:var(--accent-cyan)">${escHtml(val)}</td><td>${escHtml(unit)}</td><td style="color:var(--text-tertiary)">${escHtml(desc)}</td>`;
                     linkBudgetBody.appendChild(tr);
                 });
 
@@ -638,7 +640,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 startAnimation(sourcePos, targetPos, recvR);
                 return;
             } catch (err) {
-                log('error', `Python API Simülasyonu başarısız: ${err.message}. JS fallback motoru devralıyor.`);
+                log('error', `Python API Simülasyonu başarısız: ${err.message}. JS fallback motoru devralıyor.`, false);
             }
         }
 
@@ -688,7 +690,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const totalCount = data.results.length;
                 
                 data.results.forEach(t => {
-                    log(t.pass ? 'success' : 'error', `${t.name}: ${t.pass ? 'GEÇTİ ✓' : 'BAŞARISIZ ✗'} ${t.error}`);
+                    log(t.pass ? 'success' : 'error', `${t.name}: ${t.pass ? 'GEÇTİ ✓' : 'BAŞARISIZ ✗'} ${t.error}`, false);
                 });
                 
                 log('test', '═══════════════════════════════════════════');
@@ -701,7 +703,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 resultSnell.textContent = `${passedCount}/${totalCount} PYTHON OK`;
                 return data.allPassed;
             } catch (e) {
-                log('error', `Python testleri çalıştırılamadı: ${e.message}. JS testleri çalıştırılıyor.`);
+                log('error', `Python testleri çalıştırılamadı: ${e.message}. JS testleri çalıştırılıyor.`, false);
             }
         }
         return runLocalFormulaTests();
@@ -1039,7 +1041,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 return;
             } catch (err) {
-                log('error', `Python Veri Gönderimi hatası: ${err.message}. JS Fallback kullanılıyor.`);
+                log('error', `Python Veri Gönderimi hatası: ${err.message}. JS Fallback kullanılıyor.`, false);
             }
         }
 

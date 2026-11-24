@@ -102,3 +102,38 @@ def test_unhandled_simulation_errors_do_not_leak_details(monkeypatch):
     assert response.status_code == 500
     assert response.json()["detail"] == "Internal server error"
     assert "private internal detail" not in response.text
+
+
+def test_transmission_test_bounds_combined_environment_cells():
+    with pytest.raises(ValidationError, match="cell limit"):
+        TransmissionTestParams(gridX=200, gridY=40, gridZ=40, cellSize=10.0)
+
+
+def test_sim_params_validate_optional_lens_dimensions():
+    with pytest.raises(ValidationError):
+        SimParams(lensAperture_m=-0.5)
+    with pytest.raises(ValidationError):
+        SimParams(lensFocalLength_m=float("inf"))
+
+
+def test_send_data_legacy_large_packet_does_not_duplicate_trace():
+    response = client.post("/api/send-data", json={
+        "simParams": {"gridX": 60, "gridY": 4, "gridZ": 4, "cellSize": 100.0},
+        "pattern": "alternating",
+        "numBits": 1000,
+        "useArq": False,
+    })
+
+    assert response.status_code == 200
+    assert len(response.content) < 500_000
+    rows = response.json()["results"]
+    assert sum(1 for r in rows if r["trace"] is not None) == 1
+    assert rows[-1]["trace"] is not None
+    assert rows[-1]["linkBudget"] is not None
+
+
+def test_truncated_arq_and_duplex_frames_fail_safely():
+    from backend import arq, duplex
+
+    assert arq.parse_ack([0] * 16)["ok"] is False
+    assert duplex._parse([0] * 16)["ok"] is False

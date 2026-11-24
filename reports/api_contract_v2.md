@@ -108,7 +108,7 @@ higher n); pointing/aperture coupling after Farid & Hranilovic. Voxel score =
 ## 2. `POST /api/arq`
 
 CRC-based selective-repeat ARQ. Payload is cut into `segmentBytes` segments, each framed
-`seq(16b) | len(8b) | data | CRC-16/CCITT`; the receiver ACKs/NACKs per segment over a reverse channel with BER
+`seq(16b) | len(8b) | data | CRC-32` (IEEE 802.3; was CRC-16/CCITT before the CRC-32 switch); the receiver ACKs/NACKs per segment over a reverse channel with BER
 `ackBer`; only bad (NACKed) or unacknowledged segments are resent, at most `1 + maxRetries` attempts each. A lost ACK
 causes a **spurious retransmission** (counted).
 
@@ -181,7 +181,7 @@ random draw (their sums equal the number of failed attempts). Use it to colour t
 ## 3. `POST /api/duplex`
 
 Full-duplex wavelength-division link A <-> B in discrete time slots. Both terminals transmit **in every slot**
-(a terminal with nothing left to send emits feedback-only frames). Frame = `type | seq | fb | len | data | CRC16`;
+(a terminal with nothing left to send emits feedback-only frames). Frame = `type | seq | fb | len | data | CRC-32`;
 `fb` piggybacks the ACK/NACK for the frame received from the peer in the previous slot. A bad reverse frame loses its
 data *and* its feedback (time-out -> possible spurious retransmission). Same atmosphere both ways but wavelength-
 dependent attenuation/diffraction/scintillation, independent fading draws per direction (correlation `reciprocityRho`),
@@ -271,8 +271,8 @@ Request additions to `SendDataParams` (old fields `simParams`, `pattern`, `numBi
 | `seed` | int >= 0 (channel fading + bit flips are deterministic per seed) | 0 |
 
 Flow: the whole message (round 0 = every segment) is sent over the **actual link distance** `gridX * cellSize`
-(`distance_used_m`, not a fixed 6 km). Only after it has arrived does the receiver check each segment's CRC-16 and the
-whole-message CRC-16/CCITT, request the failed segments again, and re-insert the corrected ones at their position in the
+(`distance_used_m`, not a fixed 6 km). Only after it has arrived does the receiver check each segment's CRC-32 and the
+whole-message CRC-32, request the failed segments again, and re-insert the corrected ones at their position in the
 receive buffer; this repeats until everything verifies or `maxRetries` is spent. Channel: received power and Rytov
 scintillation from the engine link budget at that distance, noise floor chosen so BER = 1e-9 at `receiverSensitivity_dBm`;
 a ray that misses the receiver (`link.beam_blocked`) gives BER 0.5. Message bits are padded with zero bits to a byte
@@ -298,7 +298,7 @@ New fields:
       "still_failed": 7, "segments_ok_after": 9, "bit_errors_after": 18, "all_ok_after": false, "resent": [0,1,...] },
     { "round": 1, "kind": "retransmission", "n_resent": 7, "n_became_ok": 4, "became_ok": [...], "still_failed": 3, "...": "..." } ],
                                                      // middle rounds beyond 40 drop `resent` (detail_omitted); became_ok is always complete
-  "final_check": { "crc_algorithm": "CRC-16/CCITT", "message_crc_sent": "6A6B", "message_crc_received": "6A6B", "ok": true,
+  "final_check": { "crc_algorithm": "CRC-32 (IEEE 802.3)", "message_crc_sent": "CBF43926", "message_crc_received": "CBF43926", "ok": true,
                    "residual_errors": { "failed_segments": 0, "bit_errors": 0, "undetected_segments": 0 },
                    "retries_exhausted": false },
   "arq": { "segments": [...], "retries_per_region": {}, "retries_histogram": {}, "total_transmissions": 28, "retransmissions": 12,
@@ -310,3 +310,17 @@ New fields:
 
 With too few retries (e.g. `maxRetries: 0` on a marginal link) `final_check.ok` is `false`, `residual_errors` lists the
 failed segments / wrong bits and `message_crc_received != message_crc_sent`: the failure is reported, not hidden.
+
+---------------------------------------------------------------------------------------------------
+
+## CRC-32 change (integrity check)
+
+The whole project now uses **CRC-32 (IEEE 802.3 / ISO-HDLC**: poly 0x04C11DB7, reflected 0xEDB88320, init and xorout
+0xFFFFFFFF, refin/refout true; identical to `zlib.crc32`, check("123456789") = 0xCBF43926) instead of CRC-16/CCITT-FALSE.
+Consequences:
+- Every frame CRC field is 32 bits: `/api/send-data` frame = preamble | sync | length(16) | payload | CRC(32);
+  ARQ segment = `seq(2) | len(1) | data | CRC(4)` (7 bytes overhead), ACK frame = 56 bits; duplex frame overhead = 9 bytes.
+- `final_check.message_crc_sent` / `message_crc_received` are 8 upper-case hex digits; `crc_algorithm` is
+  `"CRC-32 (IEEE 802.3)"`. `frame.crc_received` / `frame.crc_computed` (send-data) are integers up to 2^32-1.
+- Wire sizes (bit_start/bit_end, slot lengths, throughput/efficiency) grow accordingly for the same payload.
+- `engine.crc16_ccitt` / `validate_crc` remain as legacy helpers only; new API: `engine.crc32`, `engine.validate_crc32`.

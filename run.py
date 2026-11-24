@@ -85,12 +85,15 @@ def run_report():
 
 
 def kill_server(port):
-    """Belirtilen portta çalışan sunucu süreçlerini durdur."""
-    import subprocess
-    result = subprocess.run(
-        ["lsof", "-ti", f":{port}"],
-        capture_output=True, text=True
-    )
+    """Belirtilen portta dinleyen sunucu süreçlerini durdur."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        print("[HATA] 'lsof' bulunamadı; süreç otomatik durdurulamadı.")
+        return 1
     pids = result.stdout.strip().splitlines()
     if not pids:
         print(f"[bilgi] Port {port}'da çalışan süreç bulunamadı.")
@@ -100,7 +103,7 @@ def kill_server(port):
         try:
             os.kill(int(pid), signal.SIGTERM)
             killed.append(pid)
-        except (ProcessLookupError, PermissionError) as e:
+        except (ProcessLookupError, PermissionError, ValueError) as e:
             print(f"[uyarı] PID {pid} durdurulamadı: {e}")
     if killed:
         print(f"[ok] Sunucu durduruldu (PID: {', '.join(killed)}).")

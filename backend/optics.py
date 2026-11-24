@@ -244,40 +244,40 @@ class OpticalSystem:
         """Optical power -C [1/m]."""
         return -float(self.matrix[1, 0])
 
+    @staticmethod
+    def _is_afocal_matrix(m: np.ndarray) -> bool:
+        return abs(m[1, 0]) <= 1e-12 * max(1.0, abs(m[0, 0]), abs(m[1, 1]))
+
     @property
     def is_afocal(self) -> bool:
-        m = self.matrix
-        return abs(m[1, 0]) <= 1e-12 * max(1.0, abs(m[0, 0]), abs(m[1, 1]))
+        return self._is_afocal_matrix(self.matrix)
 
     @property
     def efl(self) -> float:
         """Effective focal length -1/C (inf for afocal systems)."""
-        return math.inf if self.is_afocal else -1.0 / float(self.matrix[1, 0])
+        m = self.matrix
+        return math.inf if self._is_afocal_matrix(m) else -1.0 / float(m[1, 0])
 
     @property
     def bfl(self) -> float:
         """Back focal length: output plane -> rear focal point, -A/C."""
-        if self.is_afocal:
-            return math.inf
         m = self.matrix
-        return -float(m[0, 0] / m[1, 0])
+        return math.inf if self._is_afocal_matrix(m) else -float(m[0, 0] / m[1, 0])
 
     @property
     def ffl(self) -> float:
         """Front focal length: front focal point -> input plane, -D/C
         (positive when the focal point lies before the first surface)."""
-        if self.is_afocal:
-            return math.inf
         m = self.matrix
-        return -float(m[1, 1] / m[1, 0])
+        return math.inf if self._is_afocal_matrix(m) else -float(m[1, 1] / m[1, 0])
 
     def principal_planes(self) -> Optional[Tuple[float, float]]:
         """(P, P'): front principal plane measured from the input plane and
         rear principal plane measured from the output plane (positive = to the
         right).  None for afocal systems."""
-        if self.is_afocal:
-            return None
         m = self.matrix
+        if self._is_afocal_matrix(m):
+            return None
         c = float(m[1, 0])
         return (float(m[1, 1]) - 1.0) / c, (1.0 - float(m[0, 0])) / c
 
@@ -294,16 +294,17 @@ class OpticalSystem:
 
     def trace_ray(self, y0: float, theta0: float = 0.0) -> List[RayState]:
         """Trace a paraxial ray element by element."""
-        ray = np.array([float(y0), float(theta0)])
+        y, th = float(y0), float(theta0)
         out: List[RayState] = []
         for el in self.elements:
-            y_in, th_in = float(ray[0]), float(ray[1])
-            ray = el.matrix @ ray
+            y_in, th_in = y, th
+            m = el.matrix
+            y = float(m[0, 0]) * y_in + float(m[0, 1]) * th_in
+            th = float(m[1, 0]) * y_in + float(m[1, 1]) * th_in
             # the ray height at a thin element equals its entry height
             clipped = abs(y_in) > el.aperture_radius or (
                 el.obstruction_radius > 0.0 and abs(y_in) < el.obstruction_radius)
-            out.append(RayState(el.name, y_in, th_in, float(ray[0]), float(ray[1]),
-                                el.aperture_radius, bool(clipped)))
+            out.append(RayState(el.name, y_in, th_in, y, th, el.aperture_radius, bool(clipped)))
         return out
 
     def vignetted(self, y0: float, theta0: float = 0.0) -> bool:

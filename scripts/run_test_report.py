@@ -93,7 +93,7 @@ def main():
                 "",
                 "## Bit-level I/O check",
                 "",
-                "Frame = preamble + sync + length + payload + CRC-16/CCITT, sent through a seeded OOK channel (seed 1, 10 dBm Tx, -30 dBm rms noise).",
+                "Frame = preamble + sync + length + payload + CRC-32 (IEEE 802.3), sent through a seeded OOK channel (seed 1, 10 dBm Tx, -30 dBm rms noise).",
                 "",
                 *bitcheck_table(),
                 "",

@@ -321,7 +321,7 @@
     function buildArqUI(pane) {
         pane.innerHTML = `
         <div class="v2-card"><h4>🔁 Tek yönlü CRC + seçici tekrar (selective repeat) ARQ</h4>
-            <div class="v2-muted">Yük, segmentlere bölünür (seq | len | veri | CRC-16). Alıcı her segment için ACK/NACK gönderir; yalnızca hatalı veya onaysız segmentler yeniden gönderilir. ACK kaybı gereksiz tekrara yol açar.</div>
+            <div class="v2-muted">Yük, segmentlere bölünür (seq | len | veri | CRC-32). Alıcı her segment için ACK/NACK gönderir; yalnızca hatalı veya onaysız segmentler yeniden gönderilir. ACK kaybı gereksiz tekrara yol açar.</div>
             <div class="v2-grid cols-4" style="margin-top:8px">
                 <div class="v2-field" style="grid-column:1/-1"><label>Yük (metin)</label><input class="v2-input" id="aq-payload" type="text" maxlength="600" value="Merhaba FSO! Seçici tekrar (selective repeat) ARQ testi."></div>
                 <div class="v2-field"><label>Segment (bayt)</label><input class="v2-input" id="aq-seg" type="number" min="1" max="255" value="8"></div>

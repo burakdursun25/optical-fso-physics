@@ -1,11 +1,35 @@
 import math
+import zlib
 from typing import Union
 
 import numpy as np
 
 
+CRC32_POLY_REFLECTED = 0xEDB88320   # IEEE 802.3 / ISO-HDLC polynomial 0x04C11DB7, bit-reflected
+
+
+def crc32(data: Union[bytes, bytearray, memoryview, str], init: int = 0xFFFFFFFF) -> int:
+    """CRC-32 (IEEE 802.3 / ISO-HDLC), the project's integrity check.
+
+    poly 0x04C11DB7 (reflected 0xEDB88320), init 0xFFFFFFFF, refin/refout true,
+    xorout 0xFFFFFFFF.  Check value of b"123456789" is 0xCBF43926; the result is
+    identical to zlib.crc32 / binascii.crc32.  A str is encoded as UTF-8.
+    Returns an unsigned 32-bit int.  The default init gives the standard CRC;
+    passing a different ``init`` is the raw register start value (not zlib's
+    running-crc continuation convention).
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return zlib.crc32(data, (init ^ 0xFFFFFFFF) & 0xFFFFFFFF) & 0xFFFFFFFF
+
+
+def validate_crc32(data: Union[bytes, bytearray, memoryview, str], checksum: int) -> bool:
+    """True if CRC-32 of ``data`` equals the 32-bit ``checksum``."""
+    return crc32(data) == (checksum & 0xFFFFFFFF)
+
+
 def crc16_ccitt(data: Union[bytes, bytearray, memoryview, str], init: int = 0xFFFF) -> int:
-    """Compute CRC-16/CCITT-FALSE checksum for a payload.
+    """LEGACY (no longer used by the project; see crc32).  CRC-16/CCITT-FALSE checksum.
 
     The implementation matches Python's binascii.crc_hqx(data, 0xFFFF) behavior,
     which is the common CRC-CCITT variant used in serial protocols and packet
@@ -26,12 +50,14 @@ def crc16_ccitt(data: Union[bytes, bytearray, memoryview, str], init: int = 0xFF
 
 
 def validate_crc(data: Union[bytes, bytearray, memoryview, str], checksum: int, init: int = 0xFFFF) -> bool:
-    """Validate a CRC checksum against payload bytes."""
+    """LEGACY: validate a 16-bit CRC-16/CCITT-FALSE checksum.  Use validate_crc32 for new code."""
     return crc16_ccitt(data, init) == (checksum & 0xFFFF)
 
 
 # ── Vec3 Utility ──────────────────────────────────────────
 class Vec3:
+    __slots__ = ("x", "y", "z")
+
     def __init__(self, x=0.0, y=0.0, z=0.0):
         self.x = float(x)
         self.y = float(y)
@@ -135,17 +161,17 @@ class AtmosphereGrid:
         return self.totalDistanceM / 1000.0
 
     def initializeDefault(self):
-        for iz in range(self.gridZ):
-            for iy in range(self.gridY):
-                for ix in range(self.gridX):
-                    idx = self.index(ix, iy, iz)
-                    altitude = (iz + 0.5) * self.cellSize
-                    self.temperature[idx] = 20.0
-                    self.pressure[idx] = self.pressureAtAltitude(altitude)
-                    self.humidity[idx] = 50.0
-                    self.wind[idx] = 0.0
-                    self.Cn2[idx] = ATM_CONSTANTS["Cn2_moderate"]
-                    self.grid[idx] = self.n_base
+        self.temperature.fill(20.0)
+        self.humidity.fill(50.0)
+        self.wind.fill(0.0)
+        self.Cn2.fill(ATM_CONSTANTS["Cn2_moderate"])
+        self.grid.fill(self.n_base)
+        alt_z = (np.arange(self.gridZ, dtype=np.float64) + 0.5) * self.cellSize
+        p_z = ATM_CONSTANTS["P0"] * np.power(
+            1.0 - ATM_CONSTANTS["Lapse"] * alt_z / ATM_CONSTANTS["T0"],
+            (ATM_CONSTANTS["g"] * ATM_CONSTANTS["M"]) / (ATM_CONSTANTS["R"] * ATM_CONSTANTS["Lapse"]),
+        )
+        self.pressure.reshape(self.gridZ, self.gridY, self.gridX)[:] = p_z[:, None, None]
 
     def pressureAtAltitude(self, h):
         P0 = ATM_CONSTANTS["P0"]
@@ -203,39 +229,40 @@ class AtmosphereGrid:
         wavelengthUm = float(params.get("wavelengthUm", 1.55))
         useEdlen = bool(params.get("useEdlen", True))
 
-        rng = seed
-        def rand():
-            nonlocal rng
-            rng = (rng * 1664525 + 1013904223) & 0xffffffff
-            return (rng >> 0) / 4294967295.0
+        gx, gy, gz = self.gridX, self.gridY, self.gridZ
+        total_cells = gx * gy * gz
+        shape = (gz, gy, gx)
 
-        def hashVal(ix, iy, iz):
-            # Perfect JS signed 32-bit replication in Python using numpy signed integer overflows
-            h = np.int64(ix) * 374761393 + np.int64(iy) * 668265263 + np.int64(iz) * 1274126177
-            h = np.int32(h)
-            with np.errstate(over='ignore'):
-                h = np.int32((h ^ (h >> 13)) * 1274126177)
-            return float(h & np.int32(0x7fffffff)) / 2147483647.0
+        def hashVal(ix_i, iy_i, iz_i):
+            # Replicate 32-bit signed integer wrap identically to the scalar implementation
+            with np.errstate(over="ignore"):
+                h = (
+                    ix_i * np.int64(374761393)
+                    + iy_i * np.int64(668265263)
+                    + iz_i * np.int64(1274126177)
+                ).astype(np.int32)
+                h = ((h ^ (h >> np.int32(13))) * np.int32(1274126177)).astype(np.int32)
+            return (h & np.int32(0x7fffffff)).astype(np.float64) / 2147483647.0
 
         def noise3D(x, y, z):
-            ix = math.floor(x)
-            iy = math.floor(y)
-            iz = math.floor(z)
-            fx = x - ix
-            fy = y - iy
-            fz = z - iz
+            ix_i = np.floor(x).astype(np.int64)
+            iy_i = np.floor(y).astype(np.int64)
+            iz_i = np.floor(z).astype(np.int64)
+            fx = x - ix_i
+            fy = y - iy_i
+            fz = z - iz_i
             sx = fx * fx * (3.0 - 2.0 * fx)
             sy = fy * fy * (3.0 - 2.0 * fy)
             sz = fz * fz * (3.0 - 2.0 * fz)
 
-            n000 = hashVal(ix, iy, iz)
-            n100 = hashVal(ix + 1, iy, iz)
-            n010 = hashVal(ix, iy + 1, iz)
-            n110 = hashVal(ix + 1, iy + 1, iz)
-            n001 = hashVal(ix, iy, iz + 1)
-            n101 = hashVal(ix + 1, iy, iz + 1)
-            n011 = hashVal(ix, iy + 1, iz + 1)
-            n111 = hashVal(ix + 1, iy + 1, iz + 1)
+            n000 = hashVal(ix_i, iy_i, iz_i)
+            n100 = hashVal(ix_i + 1, iy_i, iz_i)
+            n010 = hashVal(ix_i, iy_i + 1, iz_i)
+            n110 = hashVal(ix_i + 1, iy_i + 1, iz_i)
+            n001 = hashVal(ix_i, iy_i, iz_i + 1)
+            n101 = hashVal(ix_i + 1, iy_i, iz_i + 1)
+            n011 = hashVal(ix_i, iy_i + 1, iz_i + 1)
+            n111 = hashVal(ix_i + 1, iy_i + 1, iz_i + 1)
 
             nx00 = n000 + sx * (n100 - n000)
             nx10 = n010 + sx * (n110 - n010)
@@ -244,96 +271,119 @@ class AtmosphereGrid:
 
             nxy0 = nx00 + sy * (nx10 - nx00)
             nxy1 = nx01 + sy * (nx11 - nx01)
-
             return nxy0 + sz * (nxy1 - nxy0)
 
         Cn2Base = {
             "weak": ATM_CONSTANTS["Cn2_weak"],
             "moderate": ATM_CONSTANTS["Cn2_moderate"],
-            "strong": ATM_CONSTANTS["Cn2_strong"]
+            "strong": ATM_CONSTANTS["Cn2_strong"],
         }.get(Cn2Level, ATM_CONSTANTS["Cn2_moderate"])
 
-        for iz in range(self.gridZ):
-            for iy in range(self.gridY):
-                for ix in range(self.gridX):
-                    idx = self.index(ix, iy, iz)
-                    altitude = (iz + 0.5) * self.cellSize
-                    temp = baseTemp
+        iz = np.arange(gz, dtype=np.float64)[:, None, None]
+        iy = np.arange(gy, dtype=np.float64)[None, :, None]
+        ix = np.arange(gx, dtype=np.float64)[None, None, :]
+        altitude = (iz + 0.5) * self.cellSize
+        temp_alt = baseTemp - ATM_CONSTANTS["Lapse"] * altitude
 
-                    if profile == "uniform":
-                        temp = self.temperatureAtAltitude(altitude, baseTemp)
-                    elif profile == "gradient":
-                        temp = self.temperatureAtAltitude(altitude, baseTemp) + deltaT * (1.0 - iz / self.gridZ)
-                    elif profile == "turbulent":
-                        scale1 = noise3D(ix * 0.1, iy * 0.2, iz * 0.15) - 0.5
-                        scale2 = noise3D(ix * 0.3, iy * 0.5, iz * 0.4) - 0.5
-                        scale3 = noise3D(ix * 0.7, iy * 1.0, iz * 0.9) - 0.5
-                        turb = scale1 * 0.6 + scale2 * 0.3 + scale3 * 0.1
-                        temp = self.temperatureAtAltitude(altitude, baseTemp) + deltaT * turbulenceScale * turb * 2.0
-                    elif profile == "hotspot":
-                        cx = self.gridX * 0.4
-                        cy = self.gridY * 0.5
-                        dx_diff = (ix - cx) / (self.gridX * 0.15)
-                        dy_diff = (iy - cy) / (self.gridY * 0.3)
-                        dz_diff = iz / (self.gridZ * 0.3)
-                        dist2 = dx_diff * dx_diff + dy_diff * dy_diff + dz_diff * dz_diff
-                        temp = self.temperatureAtAltitude(altitude, baseTemp) + deltaT * math.exp(-dist2)
-                        turbNoise = (noise3D(ix * 0.2, iy * 0.3, iz * 0.2) - 0.5) * 2.0
-                        temp += math.exp(-dist2) * deltaT * 0.2 * turbNoise
-                    elif profile == "layered":
-                        layerThickness = self.gridZ * self.cellSize / 4.0
-                        normalizedAlt = altitude / layerThickness
-                        layerIndex = math.floor(normalizedAlt)
-                        inLayer = normalizedAlt - layerIndex
-                        layerTemp = deltaT * 0.5 if (layerIndex % 2 == 0) else -deltaT * 0.3
-                        nextLayerTemp = deltaT * 0.5 if ((layerIndex + 1) % 2 == 0) else -deltaT * 0.3
-                        smooth = inLayer * inLayer * (3.0 - 2.0 * inLayer)
-                        temp = baseTemp + layerTemp + (nextLayerTemp - layerTemp) * smooth
-                        temp += (noise3D(ix * 0.15, iy * 0.2, iz * 0.1) - 0.5) * 3.0
-                    elif profile == "coastal":
-                        transition = ix / self.gridX
-                        seaTemp = baseTemp - deltaT * 0.3
-                        landTemp = baseTemp + deltaT * 0.5
-                        smoothT = transition * transition * (3.0 - 2.0 * transition)
-                        temp = seaTemp + (landTemp - seaTemp) * smoothT
-                        temp = self.temperatureAtAltitude(altitude, temp)
-                        if transition > 0.4:
-                            turbScale = (transition - 0.4) / 0.6
-                            temp += (noise3D(ix * 0.2, iy * 0.3, iz * 0.25) - 0.5) * deltaT * 0.4 * turbScale
+        if profile == "uniform":
+            temp = np.broadcast_to(temp_alt, shape).copy()
+        elif profile == "gradient":
+            temp = np.broadcast_to(temp_alt + deltaT * (1.0 - iz / gz), shape).copy()
+        elif profile == "turbulent":
+            scale1 = noise3D(ix * 0.1, iy * 0.2, iz * 0.15) - 0.5
+            scale2 = noise3D(ix * 0.3, iy * 0.5, iz * 0.4) - 0.5
+            scale3 = noise3D(ix * 0.7, iy * 1.0, iz * 0.9) - 0.5
+            turb = scale1 * 0.6 + scale2 * 0.3 + scale3 * 0.1
+            temp = temp_alt + deltaT * turbulenceScale * turb * 2.0
+        elif profile == "hotspot":
+            cx = gx * 0.4
+            cy = gy * 0.5
+            dx_diff = (ix - cx) / (gx * 0.15)
+            dy_diff = (iy - cy) / (gy * 0.3)
+            dz_diff = iz / (gz * 0.3)
+            exp_neg_d2 = np.exp(-(dx_diff * dx_diff + dy_diff * dy_diff + dz_diff * dz_diff))
+            turbNoise = (noise3D(ix * 0.2, iy * 0.3, iz * 0.2) - 0.5) * 2.0
+            temp = temp_alt + deltaT * exp_neg_d2 * (1.0 + 0.2 * turbNoise)
+        elif profile == "layered":
+            layerThickness = gz * self.cellSize / 4.0
+            normalizedAlt = altitude / layerThickness
+            layerIndex = np.floor(normalizedAlt).astype(np.int64)
+            inLayer = normalizedAlt - layerIndex
+            even = (layerIndex % 2) == 0
+            layerTemp = np.where(even, deltaT * 0.5, -deltaT * 0.3)
+            nextLayerTemp = np.where(even, -deltaT * 0.3, deltaT * 0.5)
+            smooth = inLayer * inLayer * (3.0 - 2.0 * inLayer)
+            temp = baseTemp + layerTemp + (nextLayerTemp - layerTemp) * smooth
+            temp = temp + (noise3D(ix * 0.15, iy * 0.2, iz * 0.1) - 0.5) * 3.0
+        elif profile == "coastal":
+            transition = ix / gx
+            seaTemp = baseTemp - deltaT * 0.3
+            landTemp = baseTemp + deltaT * 0.5
+            smoothT = transition * transition * (3.0 - 2.0 * transition)
+            temp = (seaTemp + (landTemp - seaTemp) * smoothT) - ATM_CONSTANTS["Lapse"] * altitude
+            mask = transition > 0.4
+            if np.any(mask):
+                turbScale = np.where(mask, (transition - 0.4) / 0.6, 0.0)
+                temp = temp + (noise3D(ix * 0.2, iy * 0.3, iz * 0.25) - 0.5) * deltaT * 0.4 * turbScale
+        else:
+            temp = np.full(shape, baseTemp, dtype=np.float64)
 
-                    windPert = (noise3D(ix * 0.1 + 7.3, iy * 0.2 + 3.1, iz * 0.15 + 5.7) - 0.5) * windSpeed * 0.5
-                    self.wind[idx] = windSpeed + windPert
-                    temp += windPert * 0.2
+        windPert = (noise3D(ix * 0.1 + 7.3, iy * 0.2 + 3.1, iz * 0.15 + 5.7) - 0.5) * windSpeed * 0.5
+        self.wind[:] = (windSpeed + windPert).ravel()
+        temp = temp + windPert * 0.2
+        self.temperature[:] = temp.ravel()
 
-                    self.temperature[idx] = temp
-                    P = self.pressureAtAltitude(altitude)
-                    self.pressure[idx] = P
-                    self.humidity[idx] = min(100.0, max(0.0, humidity_val + (rand() - 0.5) * 10.0))
+        P = ATM_CONSTANTS["P0"] * np.power(
+            1.0 - ATM_CONSTANTS["Lapse"] * altitude / ATM_CONSTANTS["T0"],
+            (ATM_CONSTANTS["g"] * ATM_CONSTANTS["M"]) / (ATM_CONSTANTS["R"] * ATM_CONSTANTS["Lapse"]),
+        )
+        self.pressure.reshape(shape)[:] = P
 
-                    if useEdlen:
-                        self.grid[idx] = self.refractiveIndexEdlen(temp, P, self.humidity[idx], wavelengthUm)
-                    else:
-                        self.grid[idx] = self.refractiveIndexSimple(temp, P)
+        # Exact LCG sequence in (iz, iy, ix) order for deterministic humidity parity
+        rng = seed
+        rands = np.fromiter(
+            ((rng := (rng * 1664525 + 1013904223) & 0xFFFFFFFF) for _ in range(total_cells)),
+            dtype=np.float64,
+            count=total_cells,
+        ) / 4294967295.0
+        self.humidity[:] = np.clip(humidity_val + (rands - 0.5) * 10.0, 0.0, 100.0)
 
-                    self.Cn2[idx] = self.Cn2HufnagelValley(altitude, windSpeed + abs(windPert), Cn2Base)
+        if useEdlen:
+            sigma2 = 1.0 / (wavelengthUm * wavelengthUm)
+            n_s_minus_1 = (
+                ATM_CONSTANTS["A"]
+                + ATM_CONSTANTS["B"] / (ATM_CONSTANTS["C"] - sigma2)
+                + ATM_CONSTANTS["D"] / (ATM_CONSTANTS["E"] - sigma2)
+            )
+            n_tp = n_s_minus_1 * (P / ATM_CONSTANTS["P0"]) * (ATM_CONSTANTS["T0"] / (temp + 273.15))
+            e_s = 611.21 * np.exp((18.678 - temp / 234.5) * (temp / (257.14 + temp)))
+            hum_f64 = self.humidity.reshape(shape).astype(np.float64)
+            self.grid[:] = (1.0 + n_tp - 4.15e-8 * (hum_f64 / 100.0) * e_s).ravel()
+        else:
+            self.grid[:] = (1.0 + 0.000293 * (288.15 / (temp + 273.15)) * (P / 101325.0)).ravel()
+
+        v_rms = windSpeed + np.abs(windPert)
+        cn2 = (
+            0.00594 * np.square(v_rms / 27.0) * np.power(1e-5 * altitude, 10) * np.exp(-altitude / 1000.0)
+            + 2.7e-16 * np.exp(-altitude / 1500.0)
+            + Cn2Base * np.exp(-altitude / 100.0)
+        )
+        self.Cn2[:] = cn2.ravel()
+
+    def _clamped_index(self, ix, iy, iz):
+        ix = max(0, min(self.gridX - 1, int(ix)))
+        iy = max(0, min(self.gridY - 1, int(iy)))
+        iz = max(0, min(self.gridZ - 1, int(iz)))
+        return ix + self.gridX * (iy + self.gridY * iz)
 
     def getRefractiveIndex(self, ix, iy, iz):
-        ix = max(0, min(self.gridX - 1, int(ix)))
-        iy = max(0, min(self.gridY - 1, int(iy)))
-        iz = max(0, min(self.gridZ - 1, int(iz)))
-        return self.grid[self.index(ix, iy, iz)]
+        return self.grid[self._clamped_index(ix, iy, iz)]
 
     def getTemperature(self, ix, iy, iz):
-        ix = max(0, min(self.gridX - 1, int(ix)))
-        iy = max(0, min(self.gridY - 1, int(iy)))
-        iz = max(0, min(self.gridZ - 1, int(iz)))
-        return self.temperature[self.index(ix, iy, iz)]
+        return self.temperature[self._clamped_index(ix, iy, iz)]
 
     def getCn2(self, ix, iy, iz):
-        ix = max(0, min(self.gridX - 1, int(ix)))
-        iy = max(0, min(self.gridY - 1, int(iy)))
-        iz = max(0, min(self.gridZ - 1, int(iz)))
-        return self.Cn2[self.index(ix, iy, iz)]
+        return self.Cn2[self._clamped_index(ix, iy, iz)]
 
     def worldToGrid(self, pos):
         return {
@@ -463,7 +513,7 @@ class AtmosphericLoss:
             "pointingCoupling": pointingCoupling,
             "effectiveCapturedFraction": effectiveCapturedFraction,
             "loss_dB": loss_dB,
-            "beamSpreadArea": math.PI * (beamDiamAtReceiver / 2.0) * (beamDiamAtReceiver / 2.0) if hasattr(math, "PI") else 3.141592653589793 * (beamDiamAtReceiver / 2.0) * (beamDiamAtReceiver / 2.0)
+            "beamSpreadArea": math.pi * beamRadiusM * beamRadiusM
         }
 
     @staticmethod

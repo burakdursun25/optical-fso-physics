@@ -147,22 +147,53 @@ class _Fields:
             self.temp[mask] += dT
 
     def interp(self, arr: np.ndarray, x: float, y: float, z: float) -> float:
-        cs = self.cs
-        out = []
-        idx = []
-        for c, g in ((x, self.gx), (y, self.gy), (z, self.gz)):
-            f = min(max(c / cs - 0.5, 0.0), float(g - 1))
-            i0 = min(int(f), max(g - 2, 0))
-            i1 = min(i0 + 1, g - 1)
-            idx.append((i0, i1, f - i0 if g > 1 else 0.0))
-        (x0, x1, tx), (y0, y1, ty), (z0, z1, tz) = idx
-        c00 = arr[z0, y0, x0] * (1 - tx) + arr[z0, y0, x1] * tx
-        c10 = arr[z0, y1, x0] * (1 - tx) + arr[z0, y1, x1] * tx
-        c01 = arr[z1, y0, x0] * (1 - tx) + arr[z1, y0, x1] * tx
-        c11 = arr[z1, y1, x0] * (1 - tx) + arr[z1, y1, x1] * tx
-        c0 = c00 * (1 - ty) + c10 * ty
-        c1 = c01 * (1 - ty) + c11 * ty
-        return float(c0 * (1 - tz) + c1 * tz)
+        inv_cs = 1.0 / self.cs
+        gx, gy, gz = self.gx, self.gy, self.gz
+
+        fx = x * inv_cs - 0.5
+        if fx <= 0.0:
+            x0 = x1 = 0
+            tx = 0.0
+        elif fx >= gx - 1:
+            x0 = x1 = gx - 1
+            tx = 0.0
+        else:
+            x0 = int(fx)
+            x1 = x0 + 1
+            tx = fx - x0
+
+        fy = y * inv_cs - 0.5
+        if fy <= 0.0:
+            y0 = y1 = 0
+            ty = 0.0
+        elif fy >= gy - 1:
+            y0 = y1 = gy - 1
+            ty = 0.0
+        else:
+            y0 = int(fy)
+            y1 = y0 + 1
+            ty = fy - y0
+
+        fz = z * inv_cs - 0.5
+        if fz <= 0.0:
+            z0 = z1 = 0
+            tz = 0.0
+        elif fz >= gz - 1:
+            z0 = z1 = gz - 1
+            tz = 0.0
+        else:
+            z0 = int(fz)
+            z1 = z0 + 1
+            tz = fz - z0
+
+        omx = 1.0 - tx
+        c00 = arr[z0, y0, x0] * omx + arr[z0, y0, x1] * tx
+        c10 = arr[z0, y1, x0] * omx + arr[z0, y1, x1] * tx
+        c01 = arr[z1, y0, x0] * omx + arr[z1, y0, x1] * tx
+        c11 = arr[z1, y1, x0] * omx + arr[z1, y1, x1] * tx
+        c0 = c00 * (1.0 - ty) + c10 * ty
+        c1 = c01 * (1.0 - ty) + c11 * ty
+        return float(c0 * (1.0 - tz) + c1 * tz)
 
 
 def _grad3(arr: np.ndarray, cs: float) -> np.ndarray:
@@ -240,12 +271,14 @@ def propagate_beam_3d(grid, source: Sequence[float], target: Sequence[float],
     use_lens = preset is not None and preset.role == "transmit"
     s_arr = np.linspace(0.0, L, n_samples + 1)
     if use_lens:
-        w_geo = np.array([optics.beam_through_system(w0, wavelength, preset.system, float(s), m2,
-                                                    preset.source_offset_m)["w"] for s in s_arr])
-        lens_T = optics.beam_through_system(w0, wavelength, preset.system, 0.0, m2,
-                                            preset.source_offset_m)["total_transmission"]
+        out0 = optics.beam_through_system(w0, wavelength, preset.system, 0.0, m2, preset.source_offset_m)
+        lens_T = out0["total_transmission"]
+        q_arr = out0["q"] + s_arr
+        im_inv_q = (1.0 / q_arr).imag
+        w_geo = np.sqrt(-m2 * wavelength / (math.pi * im_inv_q))
     else:
-        w_geo = np.array([optics.beam_radius(float(s), w0, wavelength, m2) for s in s_arr])
+        zr = optics.rayleigh_range(w0, wavelength, m2)
+        w_geo = w0 * np.sqrt(1.0 + np.square(s_arr / zr))
         lens_T = 1.0
 
     # ---- ray equation (centroid) --------------------------------------
@@ -287,7 +320,16 @@ def propagate_beam_3d(grid, source: Sequence[float], target: Sequence[float],
     lam_fresnel = 2.0 * s_arr / (k * w_geo ** 2)
     w_lt = w_geo * np.sqrt(1.0 + 1.33 * sigma2 * np.power(lam_fresnel, 5.0 / 6.0))
     wander = np.sqrt(2.42 * cn2_cum_avg * s_arr ** 3 * w_geo[0] ** (-1.0 / 3.0))
-    scint = np.array([scintillation_index_from_rytov(v) for v in sigma2])
+    s2_pos = np.maximum(sigma2, 0.0)
+    t_sc = np.power(np.sqrt(s2_pos), 12.0 / 5.0)
+    scint = np.where(
+        s2_pos > 0.0,
+        np.exp(
+            0.49 * s2_pos / np.power(1.0 + 1.11 * t_sc, 7.0 / 6.0)
+            + 0.51 * s2_pos / np.power(1.0 + 0.69 * t_sc, 5.0 / 6.0)
+        ) - 1.0,
+        0.0,
+    )
 
     f_att, f_cn2, f_grad = score_components(alpha_loc, cn2_loc, gn_loc)
     local_score = W_ATT * f_att + W_CN2 * f_cn2 + W_GRAD * f_grad

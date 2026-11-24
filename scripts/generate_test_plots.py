@@ -190,7 +190,7 @@ def plot_bit_timeline(rep=None):
         ax.plot([i + 0.5], [(rx[i] or 0) - 1.6], "o", color=C_ERR, ms=6)
     # frame field labels
     fields = [("preamble", 16), ("sync", 16), ("length", 16),
-              ("payload", rep["payload_bytes"] * 8), ("CRC-16", 16)]
+              ("payload", rep["payload_bytes"] * 8), ("CRC-32", 32)]
     pos = 0
     for name, width in fields:
         ax.axvline(pos, color="k", lw=0.6, alpha=0.5)

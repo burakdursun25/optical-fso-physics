@@ -1,13 +1,13 @@
 # Automated Physics Test Report
 
 - **Status:** PASSED
-- **Generated:** 2026-11-21T12:33:17.062583+00:00
-- **Total:** 165
-- **Passed:** 165
+- **Generated:** 2026-11-22T15:41:34.294122+00:00
+- **Total:** 377
+- **Passed:** 377
 - **Failed:** 0
 - **Errors:** 0
 - **Skipped:** 0
-- **Duration:** 1.060s
+- **Duration:** 8.205s
 
 ## Scope
 
@@ -16,17 +16,17 @@ Regression tests cover transmission matrices and deterministic ray traces; brows
 
 ## Bit-level I/O check
 
-Frame = preamble + sync + length + payload + CRC-16/CCITT, sent through a seeded OOK channel (seed 1, 10 dBm Tx, -30 dBm rms noise).
+Frame = preamble + sync + length + payload + CRC-32 (IEEE 802.3), sent through a seeded OOK channel (seed 1, 10 dBm Tx, -30 dBm rms noise).
 
 | Payload | Lens | Distance [m] | P_rx [dBm] | BER (theory) | Bit errors | BER (measured) | CRC ok |
 |---|---|---:|---:|---:|---:|---:|:---:|
-| Merhaba FSO | none | 100 | 6.4 | 0.00e+00 | 0/152 | 0.0000 | yes |
-| Merhaba FSO | none | 3000 | -20.0 | 3.25e-07 | 0/152 | 0.0000 | yes |
-| Merhaba FSO | none | 4500 | -23.8 | 1.95e-02 | 5/152 | 0.0329 | NO |
-| Merhaba FSO | none | 6000 | -26.6 | 1.39e-01 | 24/152 | 0.1579 | NO |
-| Merhaba FSO | keplerian_telescope | 6000 | -12.8 | 1.45e-153 | 0/152 | 0.0000 | yes |
-| Merhaba FSO | keplerian_telescope | 15000 | -22.5 | 2.51e-03 | 1/152 | 0.0066 | yes |
-| Merhaba FSO | diverging | 1000 | -50.2 | 4.98e-01 | 78/152 | 0.5132 | NO |
+| Merhaba FSO | none | 100 | 6.4 | 0.00e+00 | 0/168 | 0.0000 | yes |
+| Merhaba FSO | none | 3000 | -20.0 | 3.25e-07 | 0/168 | 0.0000 | yes |
+| Merhaba FSO | none | 4500 | -23.8 | 1.95e-02 | 5/168 | 0.0298 | NO |
+| Merhaba FSO | none | 6000 | -26.6 | 1.39e-01 | 24/168 | 0.1429 | NO |
+| Merhaba FSO | keplerian_telescope | 6000 | -12.8 | 1.45e-153 | 0/168 | 0.0000 | yes |
+| Merhaba FSO | keplerian_telescope | 15000 | -22.5 | 2.51e-03 | 1/168 | 0.0060 | yes |
+| Merhaba FSO | diverging | 1000 | -50.2 | 4.98e-01 | 84/168 | 0.5000 | NO |
 
 ## Figures
 

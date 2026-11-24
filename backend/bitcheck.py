@@ -3,7 +3,7 @@
 Contents
 --------
 * bytes/str <-> bit-list helpers (MSB first)
-* frame builder/parser: preamble | sync | 16-bit length | payload | CRC-16
+* frame builder/parser: preamble | sync | 16-bit length | payload | CRC-32
 * compare_bits: sent vs. received statistics (BER, flips, bursts, per-byte map)
 * a deterministic (seeded) binary-symmetric channel driven by a link budget
 * run_link_check: frame -> channel -> compare + CRC, returned as a JSON dict
@@ -17,12 +17,13 @@ import math
 import random
 from typing import Dict, List, Optional, Sequence, Union
 
-from backend.engine import crc16_ccitt
+from backend.engine import crc32
 
 Bit = Optional[int]
 
 PREAMBLE = bytes([0xAA, 0xAA])
 SYNC_WORD = bytes([0x2D, 0xD4])
+CRC_BITS = 32                                   # CRC-32 field
 HEADER_BYTES = len(PREAMBLE) + len(SYNC_WORD) + 2   # + 16-bit length
 MAX_PAYLOAD = 0xFFFF
 
@@ -30,26 +31,37 @@ MAX_PAYLOAD = 0xFFFF
 # --------------------------------------------------------------------------
 # bits <-> bytes
 # --------------------------------------------------------------------------
+_BYTE_TO_BITS = tuple(tuple((byte >> (7 - i)) & 1 for i in range(8)) for byte in range(256))
+
+
 def bytes_to_bits(data: Union[bytes, bytearray, str]) -> List[int]:
     """MSB-first bit list. str is encoded as UTF-8."""
     if isinstance(data, str):
         data = data.encode("utf-8")
-    return [(byte >> (7 - i)) & 1 for byte in data for i in range(8)]
+    out: List[int] = []
+    extend = out.extend
+    table = _BYTE_TO_BITS
+    for byte in data:
+        extend(table[byte])
+    return out
 
 
 def bits_to_bytes(bits: Sequence[Bit]) -> bytes:
     """Pack MSB-first bits into bytes; length must be a multiple of 8 and
     erasures (None) are not allowed here."""
-    if len(bits) % 8:
+    n = len(bits)
+    if n % 8:
         raise ValueError("bit count must be a multiple of 8")
-    out = bytearray()
-    for i in range(0, len(bits), 8):
-        v = 0
-        for b in bits[i:i + 8]:
-            if b not in (0, 1):
-                raise ValueError("bits must be 0 or 1")
-            v = (v << 1) | b
-        out.append(v)
+    out = bytearray(n >> 3)
+    for i in range(0, n, 8):
+        b0, b1, b2, b3, b4, b5, b6, b7 = (
+            bits[i], bits[i + 1], bits[i + 2], bits[i + 3],
+            bits[i + 4], bits[i + 5], bits[i + 6], bits[i + 7],
+        )
+        if (b0 not in (0, 1) or b1 not in (0, 1) or b2 not in (0, 1) or b3 not in (0, 1)
+                or b4 not in (0, 1) or b5 not in (0, 1) or b6 not in (0, 1) or b7 not in (0, 1)):
+            raise ValueError("bits must be 0 or 1")
+        out[i >> 3] = (b0 << 7) | (b1 << 6) | (b2 << 5) | (b3 << 4) | (b4 << 3) | (b5 << 2) | (b6 << 1) | b7
     return bytes(out)
 
 
@@ -61,7 +73,7 @@ def bits_to_str(bits: Sequence[Bit]) -> str:
 # framing
 # --------------------------------------------------------------------------
 def build_frame(payload: Union[bytes, bytearray, str]) -> List[int]:
-    """preamble(AA AA) | sync(2D D4) | length(16b) | payload | CRC-16/CCITT-FALSE.
+    """preamble(AA AA) | sync(2D D4) | length(16b) | payload | CRC-32 (IEEE 802.3).
 
     The CRC covers length field + payload.
     """
@@ -71,7 +83,7 @@ def build_frame(payload: Union[bytes, bytearray, str]) -> List[int]:
     if len(payload) > MAX_PAYLOAD:
         raise ValueError(f"payload too long (max {MAX_PAYLOAD} bytes)")
     length = len(payload).to_bytes(2, "big")
-    crc = crc16_ccitt(length + payload).to_bytes(2, "big")
+    crc = crc32(length + payload).to_bytes(4, "big")
     return bytes_to_bits(PREAMBLE + SYNC_WORD + length + payload + crc)
 
 
@@ -97,7 +109,7 @@ def parse_frame(bits: Sequence[Bit]) -> Dict[str, object]:
     n_erased = sum(1 for b in bits if b is None)
     if n_erased:
         errors.append(f"{n_erased} erased bit(s)")
-    if len(bits) < HEADER_BYTES * 8 + 16:
+    if len(bits) < HEADER_BYTES * 8 + CRC_BITS:
         errors.append("frame truncated: shorter than header + CRC")
         return res
     clean = [0 if b is None else int(b) for b in bits]
@@ -114,13 +126,13 @@ def parse_frame(bits: Sequence[Bit]) -> Dict[str, object]:
 
     length = int.from_bytes(bits_to_bytes(clean[s0:s0 + 16]), "big")
     res["length_field"] = length
-    end = s0 + 16 + length * 8 + 16
+    end = s0 + 16 + length * 8 + CRC_BITS
     if len(clean) < end:
         errors.append(f"frame truncated: length field {length} needs {end} bits, got {len(clean)}")
         return res
-    body = bits_to_bytes(clean[s0 + 16:end - 16])
-    crc_rx = int.from_bytes(bits_to_bytes(clean[end - 16:end]), "big")
-    crc_calc = crc16_ccitt(length.to_bytes(2, "big") + body)
+    body = bits_to_bytes(clean[s0 + 16:end - CRC_BITS])
+    crc_rx = int.from_bytes(bits_to_bytes(clean[end - CRC_BITS:end]), "big")
+    crc_calc = crc32(length.to_bytes(2, "big") + body)
     res["payload"] = body
     res["crc_received"] = crc_rx
     res["crc_computed"] = crc_calc

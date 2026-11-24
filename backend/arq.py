@@ -3,12 +3,12 @@
 Protocol (round based, "stop-and-collect" selective repeat):
 
 * The payload is split into K-byte segments.  Each segment is framed as
-      seq(16 b) | len(8 b) | data | CRC-16/CCITT over seq+len+data
-  (same CRC as bitcheck/engine.crc16_ccitt; preamble/sync handling is bitcheck's
+      seq(16 b) | len(8 b) | data | CRC-32 (IEEE 802.3) over seq+len+data
+  (same CRC as bitcheck/engine.crc32; preamble/sync handling is bitcheck's
   job - here frame synchronisation is assumed and only bit flips are modelled).
 * Every round the sender transmits all still-pending segments; the receiver
   checks each CRC.  Good frame -> ACK, bad frame -> NACK, both sent back as a
-  small CRC-protected feedback frame  seq(16) | status(8) | CRC16  over the
+  small CRC-protected feedback frame  seq(16) | status(8) | CRC-32  over the
   reverse channel with its own BER `ack_ber`.
 * A segment is retransmitted when it was NACKed OR when its feedback frame was
   corrupted/lost (sender time-out).  A lost ACK for a segment the receiver
@@ -34,13 +34,16 @@ cannot tell where the bits were damaged), documented as such.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 import math
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Union
 
+import numpy as np
+
 from backend import bitcheck
-from backend.engine import crc16_ccitt
+from backend.engine import crc32
 from backend.propagation3d import scintillation_index_from_rytov
 
 MAX_PAYLOAD_BYTES = 4096
@@ -49,9 +52,17 @@ MAX_RETRIES = 200
 HISTORY_KEEP = 8             # per-segment history: first N + last N attempts (+ counts)
 ROUND_DETAIL_KEEP = 20       # rounds keeping per-segment lists: first N + last N
 MAX_WIRE_BITS = 6_000_000    # total forward-bit budget of one run (runtime / memory guard)
-SEG_OVERHEAD_BYTES = 5       # seq(2) + len(1) + crc(2)
-ACK_FRAME_BITS = 40          # seq(2) + status(1) + crc(2)
+SEG_OVERHEAD_BYTES = 7       # seq(2) + len(1) + crc(4)
+ACK_FRAME_BITS = 56          # seq(2) + status(1) + crc(4)
+ACK_FRAME_BYTES = 7
 ACK, NACK = 1, 2
+
+
+@lru_cache(maxsize=16)
+def _hermegauss_weights(n: int):
+    x, w = np.polynomial.hermite_e.hermegauss(n)
+    w = w / w.sum()
+    return tuple(float(xi) for xi in x), tuple(float(wi) for wi in w)
 
 
 # --------------------------------------------------------------------------
@@ -63,7 +74,7 @@ def frame_segment(seq: int, data: bytes) -> List[int]:
     if len(data) > 255:
         raise ValueError("segment too long (max 255 bytes)")
     body = seq.to_bytes(2, "big") + bytes([len(data)]) + data
-    return bitcheck.bytes_to_bits(body + crc16_ccitt(body).to_bytes(2, "big"))
+    return bitcheck.bytes_to_bits(body + crc32(body).to_bytes(4, "big"))
 
 
 def parse_segment(bits: Sequence[int]) -> Dict[str, object]:
@@ -71,27 +82,30 @@ def parse_segment(bits: Sequence[int]) -> Dict[str, object]:
     raw = bitcheck.bits_to_bytes(bits)
     if len(raw) < SEG_OVERHEAD_BYTES:
         return {"ok": False, "seq": None, "data": b""}
-    body, crc = raw[:-2], int.from_bytes(raw[-2:], "big")
-    ok = crc16_ccitt(body) == crc and body[2] == len(body) - 3
+    body, crc = raw[:-4], int.from_bytes(raw[-4:], "big")
+    ok = crc32(body) == crc and body[2] == len(body) - 3
     return {"ok": ok, "seq": int.from_bytes(body[:2], "big"), "data": bytes(body[3:])}
 
 
 def frame_ack(seq: int, status: int) -> List[int]:
     body = seq.to_bytes(2, "big") + bytes([status])
-    return bitcheck.bytes_to_bits(body + crc16_ccitt(body).to_bytes(2, "big"))
+    return bitcheck.bytes_to_bits(body + crc32(body).to_bytes(4, "big"))
 
 
 def parse_ack(bits: Sequence[int]) -> Dict[str, object]:
     raw = bitcheck.bits_to_bytes(bits)
-    body, crc = raw[:-2], int.from_bytes(raw[-2:], "big")
-    return {"ok": crc16_ccitt(body) == crc, "seq": int.from_bytes(body[:2], "big"), "status": body[2]}
+    if len(raw) < ACK_FRAME_BYTES:
+        return {"ok": False, "seq": None, "status": None}
+    body, crc = raw[:-4], int.from_bytes(raw[-4:], "big")
+    return {"ok": crc32(body) == crc, "seq": int.from_bytes(body[:2], "big"), "status": body[2]}
 
 
 def flip_bits(bits: Sequence[int], ber: float, rng: random.Random) -> List[int]:
     """Binary symmetric channel using the caller's rng (stateful, deterministic)."""
     if ber <= 0.0:
         return list(bits)
-    return [b ^ 1 if rng.random() < ber else b for b in bits]
+    rnd = rng.random
+    return [b ^ 1 if rnd() < ber else b for b in bits]
 
 
 def hamming(a: Sequence[int], b: Sequence[int]) -> int:
@@ -131,10 +145,8 @@ class ArqChannel:
             return self.ber_override
         if self.sigma_I2 <= 0.0:
             return self.mean_ber()
-        import numpy as _np
-        x, w = _np.polynomial.hermite_e.hermegauss(n)
-        w = w / w.sum()
-        return float(sum(wi * self.ber_from_z(float(xi)) for xi, wi in zip(x, w)))
+        xs, ws = _hermegauss_weights(n)
+        return float(sum(wi * self.ber_from_z(xi) for xi, wi in zip(xs, ws)))
 
     def ber_at_power(self, p_dBm: float) -> float:
         p = 10.0 ** (p_dBm / 10.0)
@@ -365,6 +377,7 @@ def run_arq(payload: Union[bytes, str], segment_bytes: int = 8, max_retries: int
     rng = random.Random(seed)
     fading = FadingProcess(rng, channel.fading_rho)
     payload, recs = split_payload(payload, segment_bytes)
+    framed_segs = [frame_segment(i, r.data) for i, r in enumerate(recs)]
 
     pending = list(range(len(recs)))
     seg_err = [0] * len(recs)        # trace mode: data bit errors of the receiver's current copy
@@ -386,7 +399,7 @@ def run_arq(payload: Union[bytes, str], segment_bytes: int = 8, max_retries: int
                 continue
             if r.attempts > 0 and r.rx_ok:
                 r.spurious += 1
-            tx = frame_segment(i, r.data)
+            tx = framed_segs[i]
             ber_t = channel.ber_from_z(fading.next())
             rx = flip_bits(tx, ber_t, rng)
             parsed = parse_segment(rx)
@@ -458,7 +471,7 @@ def run_arq(payload: Union[bytes, str], segment_bytes: int = 8, max_retries: int
 def run_end_to_end(bits: Sequence[int], segment_bytes: int, max_retries: int, channel: ArqChannel,
                    ack_ber: float = 0.0, seed: int = 0) -> Dict:
     """Send `bits` over the full link first (round 0 = every segment), then the receiver checks the
-    per-segment CRC-16 and the whole-message CRC-16, requests the failed segments again and re-inserts
+    per-segment CRC-32 and the whole-message CRC-32, requests the failed segments again and re-inserts
     the corrected ones at their position, until everything verifies or max_retries is spent."""
     bits = [int(b) & 1 for b in bits]
     if not bits:
@@ -477,7 +490,7 @@ def run_end_to_end(bits: Sequence[int], segment_bytes: int, max_retries: int, ch
     final = b"".join(_copy(tr["last_rx"], i) for i in range(len(recs)))
     first_bits = bitcheck.bytes_to_bits(first)[:len(bits)]
     final_bits = bitcheck.bytes_to_bits(final)[:len(bits)]
-    crc_sent, crc_recv = crc16_ccitt(payload), crc16_ccitt(final)
+    crc_sent, crc_recv = crc32(payload), crc32(final)
     n_rounds = len(tr["rounds"])
     out_rounds = []
     for tr_rd in tr["rounds"]:
@@ -508,8 +521,8 @@ def run_end_to_end(bits: Sequence[int], segment_bytes: int, max_retries: int, ch
         "first_pass_bits": first_bits, "reassembled_bits": final_bits,
         "first_pass_bit_errors": sum(1 for a, b in zip(bits, first_bits) if a != b),
         "final_check": {
-            "crc_algorithm": "CRC-16/CCITT", "message_crc_sent": f"{crc_sent:04X}",
-            "message_crc_received": f"{crc_recv:04X}", "ok": bool(ok),
+            "crc_algorithm": "CRC-32 (IEEE 802.3)", "message_crc_sent": f"{crc_sent:08X}",
+            "message_crc_received": f"{crc_recv:08X}", "ok": bool(ok),
             "residual_errors": {"failed_segments": n_failed, "bit_errors": bit_errors,
                                 "undetected_segments": res["residual_errors"]["undetected_segments"]},
             "retries_exhausted": n_failed > 0,

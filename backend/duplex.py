@@ -3,7 +3,7 @@
 Each terminal transmits on its own wavelength (default A->B 1550 nm, B->A 1310 nm)
 and filters out the other one.  Both directions run simultaneously in discrete
 time slots; in every slot each terminal sends exactly one frame
-    type(8) | seq(16) | fb(8) | len(8) | data | CRC-16/CCITT        (K + 7 bytes)
+    type(8) | seq(16) | fb(8) | len(8) | data | CRC-32 (IEEE 802.3)        (K + 9 bytes)
 where `fb` PIGGYBACKS the ACK/NACK for the frame the terminal received from its
 peer in the previous slot (true duplex: no separate ACK channel).  A terminal
 with nothing left to send emits feedback-only frames ("ACK" type in the timeline).
@@ -37,13 +37,13 @@ from typing import Dict, List, Optional
 from backend import bitcheck, optics
 from backend.arq import (MAX_RETRIES, ArqChannel, FadingProcess, SegRecord, assemble_result, flip_bits,
                          hamming, split_payload)
-from backend.engine import crc16_ccitt
+from backend.engine import crc32
 from backend.propagation3d import scintillation_index_from_rytov, weather_alpha_dB_km
 
 MAX_SLOTS = 10000
 TIMELINE_KEEP = 1000      # returned timeline: first N + last N slots (+ timeline_truncated)
 HEADER_BYTES = 5            # type + seq(2) + fb + len
-FRAME_OVERHEAD_BYTES = 7    # header + crc(2)
+FRAME_OVERHEAD_BYTES = 9    # header + crc(4)
 T_DATA, T_FB = 0, 1
 FB_NONE, FB_ACK, FB_NACK = 0, 1, 2
 FB_NAMES = {FB_NONE: "NONE", FB_ACK: "ACK", FB_NACK: "NACK"}
@@ -66,13 +66,15 @@ class Terminal:
 
 def _frame(ftype: int, seq: int, fb: int, data: bytes) -> List[int]:
     body = bytes([ftype]) + seq.to_bytes(2, "big") + bytes([fb, len(data)]) + data
-    return bitcheck.bytes_to_bits(body + crc16_ccitt(body).to_bytes(2, "big"))
+    return bitcheck.bytes_to_bits(body + crc32(body).to_bytes(4, "big"))
 
 
 def _parse(bits) -> Dict:
     raw = bitcheck.bits_to_bytes(bits)
-    body, crc = raw[:-2], int.from_bytes(raw[-2:], "big")
-    ok = crc16_ccitt(body) == crc and body[4] == len(body) - HEADER_BYTES
+    if len(raw) < FRAME_OVERHEAD_BYTES:
+        return {"ok": False, "type": None, "seq": None, "fb": FB_NONE, "data": b""}
+    body, crc = raw[:-4], int.from_bytes(raw[-4:], "big")
+    ok = crc32(body) == crc and body[4] == len(body) - HEADER_BYTES
     return {"ok": ok, "type": body[0], "seq": int.from_bytes(body[1:3], "big"),
             "fb": body[3], "data": bytes(body[HEADER_BYTES:])}
 
