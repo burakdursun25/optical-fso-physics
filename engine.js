@@ -159,8 +159,8 @@ class AtmosphereGrid {
         // Saturation vapor pressure (Buck equation)
         const e_s = 611.21 * Math.exp((18.678 - tempC / 234.5) * (tempC / (257.14 + tempC)));
         const e = (humidity / 100) * e_s;
-        // Water vapor correction to refractive index
-        const humidity_correction = -4.15e-8 * e; // simplified
+        // Water vapor correction to refractive index (Edlén 1966, e in Pa)
+        const humidity_correction = -(e / 133.32236842) * (5.722 - 0.0457 * sigma2) * 1e-8;
 
         return 1 + n_tp + humidity_correction;
     }
@@ -253,6 +253,11 @@ class AtmosphereGrid {
             'moderate': ATM_CONSTANTS.Cn2_moderate,
             'strong': ATM_CONSTANTS.Cn2_strong
         }[Cn2Level] || ATM_CONSTANTS.Cn2_moderate;
+        const cn2Scale = {
+            'weak': 0.1,
+            'moderate': 1.0,
+            'strong': 10.0
+        }[Cn2Level] ?? 1.0;
 
         for (let iz = 0; iz < this.gridZ; iz++) {
             for (let iy = 0; iy < this.gridY; iy++) {
@@ -357,7 +362,9 @@ class AtmosphereGrid {
                     }
 
                     // Cn² profile
-                    this.Cn2[idx] = this.Cn2HufnagelValley(altitude, windSpeed + Math.abs(windPert), Cn2Base);
+                    const term3 = Cn2Base * Math.exp(-altitude / 100);
+                    const hv = this.Cn2HufnagelValley(altitude, windSpeed + Math.abs(windPert), Cn2Base);
+                    this.Cn2[idx] = cn2Scale * (hv - term3) + term3;
                 }
             }
         }
@@ -456,38 +463,35 @@ class AtmosphericLoss {
      * @param {string} weather - 'clear', 'haze', 'fog', 'rain'
      * @param {number} wavelengthNm - wavelength in nm
      */
-    static absorptionLoss(distance_m, weather = 'clear', wavelengthNm = 1550) {
+    static absorptionLoss(distance_m, weather = 'clear', wavelengthNm = 1550, visibilityKm = null) {
         // Atmospheric attenuation coefficient (dB/km)
         let alpha_dB_km;
-        switch (weather) {
-            case 'clear': alpha_dB_km = 0.2; break; // Visibility >10km
-            case 'haze': alpha_dB_km = 4.0; break; // Visibility ~4km
-            case 'fog': alpha_dB_km = 40.0; break; // Visibility ~0.5km
-            case 'rain': alpha_dB_km = 6.0; break; // Moderate rain
-            case 'snow': alpha_dB_km = 20.0; break; // Moderate snow
-            case 'storm': alpha_dB_km = 62.0; break; // Fırtına: sis+yağmur+kar kombine (~62 dB/km)
-            default: alpha_dB_km = 0.2;
-        }
-
-        // Kim model for fog/haze/storm (wavelength dependent)
-        if (weather === 'haze' || weather === 'fog') {
+        if (weather === 'clear') {
+            alpha_dB_km = 0.2;
+        } else if (weather === 'rain') {
+            alpha_dB_km = 6.0;
+        } else if (weather === 'snow') {
+            alpha_dB_km = 20.0;
+        } else if (weather === 'haze' || weather === 'fog') {
             // V = visibility in km
-            const V = weather === 'fog' ? 0.5 : 4.0;
+            const V = (visibilityKm !== null && visibilityKm > 0) ? visibilityKm : (weather === 'fog' ? 0.5 : 4.0);
             let q;
-            if (wavelengthNm > 500) {
-                q = V > 6 ? 1.3 : (V > 1 ? 0.585 * Math.pow(V, 1 / 3) : 0);
-            } else {
-                q = 1.6;
-            }
-            alpha_dB_km = 3.91 / V * Math.pow(550 / wavelengthNm, q);
+            if (V > 50) q = 1.6;
+            else if (V > 6) q = 1.3;
+            else if (V > 1) q = 0.16 * V + 0.34;
+            else if (V > 0.5) q = V - 0.5;
+            else q = 0;
+            alpha_dB_km = (10 / Math.LN10) * (3.91 / V) * Math.pow(550 / wavelengthNm, q);
         } else if (weather === 'storm') {
-            // Kombine: yoğun sis (V≈0.1km) + şiddetli yağmur + kar
-            const V = 0.1; // çok düşük görüş mesafesi
-            const q = 0; // en kötü Kim model katsayısı
-            const fogComponent = 3.91 / V * Math.pow(550 / wavelengthNm, q);
-            const rainComponent = 12.0;  // mm/h yoğun yağmur etkisi
-            const snowComponent = 20.0;  // kar zayıflaması
+            // Combined severe fog (V≈0.1km -> ~169.8 dB/km) + heavy rain + snow (~201.8 dB/km)
+            const V = (visibilityKm !== null && visibilityKm > 0) ? visibilityKm : 0.1;
+            const q = 0;
+            const fogComponent = (10 / Math.LN10) * (3.91 / V) * Math.pow(550 / wavelengthNm, q);
+            const rainComponent = 12.0;
+            const snowComponent = 20.0;
             alpha_dB_km = fogComponent + rainComponent + snowComponent;
+        } else {
+            alpha_dB_km = 0.2;
         }
 
         const alpha_Np_m = alpha_dB_km * Math.log(10) / 10 / 1000;
@@ -579,10 +583,18 @@ class AtmosphericLoss {
         const geometric = this.geometricLoss(distance_m, beamDivRad, receiverDiamM, beamDiamM, pointingErrorRad);
         const scintillation = this.scintillationIndex(distance_m, Cn2, wavelengthNm * 1e-9);
 
-        // Scintillation-induced power penalty (dB)
-        const scintPenalty = scintillation.sigma2_R < 5
-            ? 5 * Math.log10(1 + scintillation.sigma2_R)
-            : 10;
+        // Scintillation-induced power penalty (smooth saturating log-normal fade margin in dB)
+        const s2 = Math.max(0, scintillation.sigma2_R);
+        let sigma_I2 = 0;
+        if (s2 > 0) {
+            const t_sc = Math.pow(Math.sqrt(s2), 12 / 5);
+            sigma_I2 = Math.exp(
+                0.49 * s2 / Math.pow(1 + 1.11 * t_sc, 7 / 6)
+                + 0.51 * s2 / Math.pow(1 + 0.69 * t_sc, 5 / 6)
+            ) - 1;
+        }
+        const var_lnI = Math.log1p(Math.max(0, sigma_I2));
+        const scintPenalty = (10 / Math.LN10) * (0.5 * var_lnI + 1.645 * Math.sqrt(var_lnI));
 
         const totalLoss_dB = absorption.loss_dB + geometric.loss_dB + scintPenalty;
         const P_rx_dBm = P_tx_dBm - totalLoss_dB;
@@ -877,8 +889,11 @@ class DataTransmissionSimulator {
             case 'burst':
                 for (let i = 0; i < length; i++) data.push(Math.floor(i / 8) % 2 === 0 ? 1 : 0);
                 break;
-            case 'ascii_hello':
-                return [0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1];
+            case 'ascii_hello': {
+                const helloBits = [0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1];
+                for (let i = 0; i < length; i++) data.push(helloBits[i % helloBits.length]);
+                break;
+            }
             case 'prbs7':
                 // Pseudo-random binary sequence (PRBS-7)
                 {
@@ -973,37 +988,53 @@ class LensSystem {
         const spec = LensSystem.LENS_TYPES[lensType] || LensSystem.LENS_TYPES.none;
         this.spec = spec;
         this.focalLength_m = customFocalLength_m ?? spec.focalLength_m;
+        this.customAperture_m = customAperture_m;
         this.aperture_m = customAperture_m ?? 0.05; // 50 mm default
     }
 
     /**
-     * Apply lens effects to beam parameters.
-     * Returns modified beam divergence and transmittance factor.
-     * @param {object} beamParams - { divergenceRad, beamDiamM, receiverDiamM }
+     * Apply lens effects to beam parameters, enforcing etendue conservation
+     * and the Gaussian diffraction limit.
+     * @param {object} beamParams - { divergenceRad, beamDiamM, receiverDiamM, wavelengthNm }
      * @returns {object} modified params
      */
     applyToBeam(beamParams) {
-        const { divergenceRad = 1e-3, beamDiamM = 0.004, receiverDiamM = 0.1 } = beamParams;
+        const { divergenceRad = 1e-3, beamDiamM = 0.004, receiverDiamM = 0.1, wavelengthNm = 1550 } = beamParams;
+        const lam = wavelengthNm * 1e-9;
         const spec = this.spec;
 
-        // Effective divergence after lens
+        let effectiveBeamDiam;
         let effectiveDivergence;
         if (spec.divergenceReduction >= 0) {
+            const mag = 1 / Math.max(1e-3, 1 - spec.divergenceReduction);
+            effectiveBeamDiam = beamDiamM * mag;
             effectiveDivergence = divergenceRad * (1 - spec.divergenceReduction);
+            if (this.customAperture_m !== null && this.customAperture_m !== undefined) {
+                effectiveBeamDiam = Math.min(effectiveBeamDiam, this.customAperture_m);
+                effectiveDivergence = Math.max(
+                    effectiveDivergence,
+                    divergenceRad * (beamDiamM / Math.max(1e-9, effectiveBeamDiam))
+                );
+            }
         } else {
-            // Diverging lens increases divergence
+            effectiveBeamDiam = beamDiamM;
             effectiveDivergence = divergenceRad * (1 + Math.abs(spec.divergenceReduction));
         }
-        effectiveDivergence = Math.max(effectiveDivergence, 1e-6); // physical minimum
 
-        // Effective receiver aperture boosted by lens collection
-        const effectiveReceiverDiam = receiverDiamM * spec.apertureBoost;
+        const w0Out = effectiveBeamDiam / 2;
+        const thetaDiff = lam / (Math.PI * Math.max(1e-9, w0Out));
+        effectiveDivergence = Math.max(effectiveDivergence, thetaDiff, 1e-6);
+
+        const effectiveReceiverDiam = (this.customAperture_m !== null && this.customAperture_m !== undefined)
+            ? this.customAperture_m
+            : receiverDiamM * spec.apertureBoost;
 
         return {
             divergenceRad: effectiveDivergence,
-            beamDiamM,
+            beamDiamM: effectiveBeamDiam,
             receiverDiamM: effectiveReceiverDiam,
-            transmittance: spec.transmittance
+            transmittance: spec.transmittance,
+            diffractionLimitRad: thetaDiff
         };
     }
 
@@ -1023,7 +1054,7 @@ class LensSystem {
         });
 
         const geoBase = AtmosphericLoss.geometricLoss(distance_m, baseDivRad, baseReceiverDiam_m, baseBeamDiam_m);
-        const geoLens = AtmosphericLoss.geometricLoss(distance_m, withLens.divergenceRad, withLens.receiverDiamM, baseBeamDiam_m);
+        const geoLens = AtmosphericLoss.geometricLoss(distance_m, withLens.divergenceRad, withLens.receiverDiamM, withLens.beamDiamM);
 
         const lensTxLoss_dB = -10 * Math.log10(withLens.transmittance);
         const geometricGain_dB = geoBase.loss_dB - geoLens.loss_dB;
@@ -1194,7 +1225,8 @@ class ComprehensiveTransmissionTest {
                 const lensedBeam = lens.applyToBeam({
                     divergenceRad: beamDivRad,
                     beamDiamM: 0.004,
-                    receiverDiamM
+                    receiverDiamM,
+                    wavelengthNm
                 });
                 const effectiveRecvR = lensedBeam.receiverDiamM / 2;
 
@@ -1211,7 +1243,7 @@ class ComprehensiveTransmissionTest {
                     wavelengthNm,
                     beamDivRad: lensedBeam.divergenceRad,
                     receiverDiamM: lensedBeam.receiverDiamM,
-                    beamDiamM: 0.004,
+                    beamDiamM: lensedBeam.beamDiamM,
                     Cn2: trace.avgCn2 || 1e-15
                 });
                 const effectivePrx = linkBudget.P_rx_dBm + 10 * Math.log10(lensedBeam.transmittance);

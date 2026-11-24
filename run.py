@@ -30,7 +30,7 @@ OPTIONAL = {"matplotlib": "test grafikleri (--report)", "pytest": "testler (--te
 BACKEND_MODULES = [
     "backend.engine", "backend.optics", "backend.numerics", "backend.materials",
     "backend.bitcheck", "backend.propagation3d", "backend.arq", "backend.duplex",
-    "backend.comsol", "backend.app",
+    "backend.comsol", "backend.lens_stack", "backend.lens_stack_api", "backend.app",
 ]
 
 FRONTEND_FILES = [

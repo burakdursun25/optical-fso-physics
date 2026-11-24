@@ -86,7 +86,7 @@ def test_distance_used_equals_grid_distance():
 
 
 def test_marginal_link_retransmits_and_recovers():
-    b = _send(grid_x=60, cell=300.0, maxRetries=200, seed=4)
+    b = _send(grid_x=60, cell=250.0, maxRetries=200, seed=4)
     assert 0.0 < b["link"]["mean_ber"] < 0.3
     assert b["totalRetransmissions"] > 0 and b["n_rounds"] > 1
     assert b["first_pass_bit_errors"] > 0 and b["bitErrorRate"] > 0      # first pass shows the damage

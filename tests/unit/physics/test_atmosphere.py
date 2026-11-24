@@ -73,3 +73,42 @@ def test_randomized_humidity_stays_in_physical_range():
         atmosphere.applyThermalProfile("uniform", {"humidity": humidity, "seed": 42})
         assert atmosphere.humidity.min() >= 0.0
         assert atmosphere.humidity.max() <= 100.0
+
+
+def test_kim_kruse_fog_and_haze_attenuation_in_db_per_km():
+    fog = AtmosphericLoss.absorptionLoss(1000.0, "fog", 1550.0)
+    haze = AtmosphericLoss.absorptionLoss(1000.0, "haze", 1550.0)
+    custom = AtmosphericLoss.absorptionLoss(1000.0, "fog", 1550.0, visibility_km=0.2)
+
+    assert fog["alpha_dB_km"] == pytest.approx(33.96, abs=0.5)
+    assert haze["alpha_dB_km"] == pytest.approx(1.54, abs=0.2)
+    assert custom["alpha_dB_km"] > fog["alpha_dB_km"]
+
+
+def test_edlen_humidity_correction_uses_pascal_units():
+    atmosphere = AtmosphereGrid(2, 2, 2, 100.0)
+    n_dry = atmosphere.refractiveIndexEdlen(15.0, 101325.0, humidity=0.0, wavelengthUm=1.55)
+    n_wet = atmosphere.refractiveIndexEdlen(15.0, 101325.0, humidity=100.0, wavelengthUm=1.55)
+    delta_n = n_wet - n_dry
+
+    assert -1e-6 <= delta_n <= -5e-7
+    assert delta_n == pytest.approx(-7.3e-7, abs=2e-7)
+
+
+def test_scintillation_penalty_is_continuous_across_sigma2_five():
+    below = AtmosphericLoss.linkBudget({"distance_m": 6000.0, "Cn2": 9.2e-15})
+    above = AtmosphericLoss.linkBudget({"distance_m": 6000.0, "Cn2": 9.6e-15})
+
+    assert below["scintillation"]["sigma2_R"] < 5.0 < above["scintillation"]["sigma2_R"]
+    assert abs(above["scintPenalty_dB"] - below["scintPenalty_dB"]) < 0.2
+
+
+def test_cn2_levels_are_distinguishable_at_link_altitude():
+    vals = {}
+    for level in ("weak", "moderate", "strong"):
+        g = AtmosphereGrid(10, 10, 10, 100.0)
+        g.applyThermalProfile("gradient", {"Cn2Level": level})
+        vals[level] = float(g.getCn2(5, 5, 5))
+
+    assert vals["weak"] < vals["moderate"] < vals["strong"]
+    assert vals["moderate"] / vals["weak"] >= 3.0

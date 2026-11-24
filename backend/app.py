@@ -240,7 +240,8 @@ def run_simulation_backend(p: SimParams):
     lensed_beam = lens.apply_to_beam({
         "divergenceRad": p.beamDivRad,
         "beamDiamM": 0.004,
-        "receiverDiamM": p.receiverDiamM
+        "receiverDiamM": p.receiverDiamM,
+        "wavelengthNm": p.wavelengthNm,
     })
     recvR = lensed_beam["receiverDiamM"] / 2.0
 
@@ -255,7 +256,7 @@ def run_simulation_backend(p: SimParams):
         "wavelengthNm": p.wavelengthNm,
         "beamDivRad": lensed_beam["divergenceRad"],
         "receiverDiamM": lensed_beam["receiverDiamM"],
-        "beamDiamM": 0.004,
+        "beamDiamM": lensed_beam["beamDiamM"],
         "Cn2": trace["avgCn2"] if trace["avgCn2"] > 0 else 1e-15,
         "pointingErrorRad": p.pointingErrorRad,
         "receiverSensitivity_dBm": p.receiverSensitivity_dBm
@@ -867,7 +868,9 @@ def export_comsol_java(p: SimParams):
             "wavelength": wavelengthUm * 1e-6,
             "laserPower": laserPower_W,
             "baseTemp": p.baseTemp,
-            "deltaT": p.deltaT
+            "deltaT": p.deltaT,
+            "beamDivRad": p.beamDivRad,
+            "Cn2": float(atmosphere.Cn2.mean()) if len(atmosphere.Cn2) else 1e-15,
         })
         return {"filename": "FSO_AtmosphericChannel.java", "content": script, "mimeType": "text/x-java-source"}
     except Exception as error:
@@ -881,7 +884,9 @@ def export_comsol_matlab(p: SimParams):
         wavelengthUm = p.wavelengthNm / 1000.0
         script = bridge.generateMatlabScript(atmosphere, sourcePos, targetPos, {
             "wavelength": wavelengthUm * 1e-6,
-            "baseTemp": p.baseTemp
+            "baseTemp": p.baseTemp,
+            "beamDivRad": p.beamDivRad,
+            "Cn2": float(atmosphere.Cn2.mean()) if len(atmosphere.Cn2) else 1e-15,
         })
         return {"filename": "FSO_COMSOL_LiveLink.m", "content": script, "mimeType": "text/x-matlab"}
     except Exception as error:
@@ -898,7 +903,9 @@ def export_comsol_params(p: SimParams):
             "wavelength": wavelengthUm * 1e-6,
             "laserPower": laserPower_W,
             "baseTemp": p.baseTemp,
-            "deltaT": p.deltaT
+            "deltaT": p.deltaT,
+            "beamDivRad": p.beamDivRad,
+            "Cn2": float(atmosphere.Cn2.mean()) if len(atmosphere.Cn2) else 1e-15,
         })
         return {"filename": "comsol_parameters.txt", "content": params_txt, "mimeType": "text/plain"}
     except Exception as error:

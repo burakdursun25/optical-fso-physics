@@ -202,7 +202,7 @@ class AtmosphereGrid:
 
         e_s = 611.21 * math.exp((18.678 - tempC / 234.5) * (tempC / (257.14 + tempC)))
         e = (humidity / 100.0) * e_s
-        humidity_correction = -4.15e-8 * e
+        humidity_correction = -(e / 133.32236842) * (5.722 - 0.0457 * sigma2) * 1e-8
 
         return 1.0 + n_tp + humidity_correction
 
@@ -278,6 +278,11 @@ class AtmosphereGrid:
             "moderate": ATM_CONSTANTS["Cn2_moderate"],
             "strong": ATM_CONSTANTS["Cn2_strong"],
         }.get(Cn2Level, ATM_CONSTANTS["Cn2_moderate"])
+        cn2_scale = {
+            "weak": 0.1,
+            "moderate": 1.0,
+            "strong": 10.0,
+        }.get(Cn2Level, 1.0)
 
         iz = np.arange(gz, dtype=np.float64)[:, None, None]
         iy = np.arange(gy, dtype=np.float64)[None, :, None]
@@ -358,14 +363,18 @@ class AtmosphereGrid:
             n_tp = n_s_minus_1 * (P / ATM_CONSTANTS["P0"]) * (ATM_CONSTANTS["T0"] / (temp + 273.15))
             e_s = 611.21 * np.exp((18.678 - temp / 234.5) * (temp / (257.14 + temp)))
             hum_f64 = self.humidity.reshape(shape).astype(np.float64)
-            self.grid[:] = (1.0 + n_tp - 4.15e-8 * (hum_f64 / 100.0) * e_s).ravel()
+            e = (hum_f64 / 100.0) * e_s
+            humidity_corr = -(e / 133.32236842) * (5.722 - 0.0457 * sigma2) * 1e-8
+            self.grid[:] = (1.0 + n_tp + humidity_corr).ravel()
         else:
             self.grid[:] = (1.0 + 0.000293 * (288.15 / (temp + 273.15)) * (P / 101325.0)).ravel()
 
         v_rms = windSpeed + np.abs(windPert)
         cn2 = (
-            0.00594 * np.square(v_rms / 27.0) * np.power(1e-5 * altitude, 10) * np.exp(-altitude / 1000.0)
-            + 2.7e-16 * np.exp(-altitude / 1500.0)
+            cn2_scale * (
+                0.00594 * np.square(v_rms / 27.0) * np.power(1e-5 * altitude, 10) * np.exp(-altitude / 1000.0)
+                + 2.7e-16 * np.exp(-altitude / 1500.0)
+            )
             + Cn2Base * np.exp(-altitude / 100.0)
         )
         self.Cn2[:] = cn2.ravel()
@@ -443,43 +452,37 @@ def verifySnellLaw(n1, n2, cosTheta_i, cosTheta_t):
 # ── Atmospheric Loss Calculator ──────────────────────────────
 class AtmosphericLoss:
     @staticmethod
-    def absorptionLoss(distance_m, weather="clear", wavelengthNm=1550.0):
+    def absorptionLoss(distance_m, weather="clear", wavelengthNm=1550.0, visibility_km=None):
         # Attenuation coefficient in dB/km
         if weather == "clear":
             alpha_dB_km = 0.2
-        elif weather == "haze":
-            alpha_dB_km = 4.0
-        elif weather == "fog":
-            alpha_dB_km = 40.0
         elif weather == "rain":
             alpha_dB_km = 6.0
         elif weather == "snow":
             alpha_dB_km = 20.0
-        elif weather == "storm":
-            alpha_dB_km = 62.0  # Fırtına: sis+yağmur+kar kombine (~62 dB/km)
-        else:
-            alpha_dB_km = 0.2
-
-        if weather in ["haze", "fog"]:
-            V = 0.5 if (weather == "fog") else 4.0
-            if wavelengthNm > 500.0:
-                if V > 6.0:
-                    q = 1.3
-                elif V > 1.0:
-                    q = 0.585 * math.pow(V, 1.0 / 3.0)
-                else:
-                    q = 0.0
-            else:
+        elif weather in ("haze", "fog"):
+            V = float(visibility_km) if (visibility_km is not None and visibility_km > 0) else (0.5 if weather == "fog" else 4.0)
+            if V > 50.0:
                 q = 1.6
-            alpha_dB_km = 3.91 / V * math.pow(550.0 / wavelengthNm, q)
+            elif V > 6.0:
+                q = 1.3
+            elif V > 1.0:
+                q = 0.16 * V + 0.34
+            elif V > 0.5:
+                q = V - 0.5
+            else:
+                q = 0.0
+            alpha_dB_km = (10.0 / math.log(10.0)) * (3.91 / V) * math.pow(550.0 / wavelengthNm, q)
         elif weather == "storm":
-            # Kombine: yoğun sis (V≈0.1km) + şiddetli yağmur + kar
-            V = 0.1
+            # Combined severe fog (V≈0.1km -> ~169.8 dB/km) + heavy rain + snow (~201.8 dB/km)
+            V = float(visibility_km) if (visibility_km is not None and visibility_km > 0) else 0.1
             q = 0.0
-            fog_component  = 3.91 / V * math.pow(550.0 / wavelengthNm, q)
+            fog_component = (10.0 / math.log(10.0)) * (3.91 / V) * math.pow(550.0 / wavelengthNm, q)
             rain_component = 12.0
             snow_component = 20.0
             alpha_dB_km = fog_component + rain_component + snow_component
+        else:
+            alpha_dB_km = 0.2
 
         alpha_Np_m = alpha_dB_km * math.log(10.0) / 10.0 / 1000.0
         transmission = math.exp(-alpha_Np_m * distance_m)
@@ -559,7 +562,17 @@ class AtmosphericLoss:
         )
         scintillation = AtmosphericLoss.scintillationIndex(distance_m, Cn2, wavelengthNm * 1e-9)
 
-        scintPenalty = 5.0 * math.log10(1.0 + scintillation["sigma2_R"]) if (scintillation["sigma2_R"] < 5.0) else 10.0
+        s2 = max(0.0, scintillation["sigma2_R"])
+        if s2 == 0.0:
+            sigma_I2 = 0.0
+        else:
+            t_sc = math.pow(math.sqrt(s2), 12.0 / 5.0)
+            sigma_I2 = math.exp(
+                0.49 * s2 / math.pow(1.0 + 1.11 * t_sc, 7.0 / 6.0)
+                + 0.51 * s2 / math.pow(1.0 + 0.69 * t_sc, 5.0 / 6.0)
+            ) - 1.0
+        var_lnI = math.log1p(max(0.0, sigma_I2))
+        scintPenalty = (10.0 / math.log(10.0)) * (0.5 * var_lnI + 1.645 * math.sqrt(var_lnI))
 
         totalLoss_dB = absorption["loss_dB"] + geometric["loss_dB"] + scintPenalty
         P_rx_dBm = P_tx_dBm - totalLoss_dB
@@ -880,7 +893,8 @@ class DataTransmissionSimulator:
             for i in range(length):
                 data.append(1 if (i // 8) % 2 == 0 else 0)
         elif pattern == "ascii_hello":
-            return [0,1,0,0,1,0,0,0, 0,1,0,0,0,1,0,1, 0,1,0,0,1,1,0,0, 0,1,0,0,1,1,0,0, 0,1,0,0,1,1,1,1]
+            hello_bits = [0,1,0,0,1,0,0,0, 0,1,0,0,0,1,0,1, 0,1,0,0,1,1,0,0, 0,1,0,0,1,1,0,0, 0,1,0,0,1,1,1,1]
+            return [hello_bits[i % len(hello_bits)] for i in range(length)]
         elif pattern == "prbs7":
             lfsr = 0x7F
             for _ in range(length):
@@ -957,33 +971,52 @@ class LensSystem:
         self.lens_type = lens_type
         self.spec = self.LENS_TYPES.get(lens_type, self.LENS_TYPES["none"])
         self.focal_length_m = custom_focal_length_m if custom_focal_length_m is not None else self.spec["focalLength_m"]
+        self.custom_aperture_m = custom_aperture_m
         self.aperture_m = custom_aperture_m if custom_aperture_m is not None else 0.05
 
     def apply_to_beam(self, beam_params):
         """
-        Apply lens effects to beam parameters.
-        Returns modified beam divergence and transmittance factor.
-        beam_params: dict with divergenceRad, beamDiamM, receiverDiamM
+        Apply lens effects to beam parameters, enforcing etendue conservation
+        and the Gaussian diffraction limit.
+        beam_params: dict with divergenceRad, beamDiamM, receiverDiamM, optional wavelengthNm
         """
         divergence_rad = beam_params.get("divergenceRad", 1e-3)
         beam_diam_m = beam_params.get("beamDiamM", 0.004)
         receiver_diam_m = beam_params.get("receiverDiamM", 0.1)
+        wavelength_nm = float(beam_params.get("wavelengthNm", 1550.0))
+        lam = wavelength_nm * 1e-9
         spec = self.spec
 
         dr = spec["divergenceReduction"]
         if dr >= 0:
+            mag = 1.0 / max(1e-3, 1.0 - dr)
+            effective_beam_diam = beam_diam_m * mag
             effective_divergence = divergence_rad * (1.0 - dr)
+            if self.custom_aperture_m is not None:
+                effective_beam_diam = min(effective_beam_diam, self.custom_aperture_m)
+                effective_divergence = max(
+                    effective_divergence,
+                    divergence_rad * (beam_diam_m / max(1e-9, effective_beam_diam)),
+                )
         else:
+            effective_beam_diam = beam_diam_m
             effective_divergence = divergence_rad * (1.0 + abs(dr))
-        effective_divergence = max(effective_divergence, 1e-6)
 
-        effective_receiver_diam = receiver_diam_m * spec["apertureBoost"]
+        w0_out = effective_beam_diam / 2.0
+        theta_diff = lam / (math.pi * max(1e-9, w0_out))
+        effective_divergence = max(effective_divergence, theta_diff, 1e-6)
+
+        if self.custom_aperture_m is not None:
+            effective_receiver_diam = self.custom_aperture_m
+        else:
+            effective_receiver_diam = receiver_diam_m * spec["apertureBoost"]
 
         return {
             "divergenceRad": effective_divergence,
-            "beamDiamM": beam_diam_m,
+            "beamDiamM": effective_beam_diam,
             "receiverDiamM": effective_receiver_diam,
-            "transmittance": spec["transmittance"]
+            "transmittance": spec["transmittance"],
+            "diffractionLimitRad": theta_diff,
         }
 
     def get_link_budget_gain_dB(self, distance_m, base_div_rad=1e-3, base_receiver_diam_m=0.1, base_beam_diam_m=0.004):
@@ -994,7 +1027,7 @@ class LensSystem:
             "receiverDiamM": base_receiver_diam_m
         })
         geo_base = AtmosphericLoss.geometricLoss(distance_m, base_div_rad, base_receiver_diam_m, base_beam_diam_m)
-        geo_lens = AtmosphericLoss.geometricLoss(distance_m, with_lens["divergenceRad"], with_lens["receiverDiamM"], base_beam_diam_m)
+        geo_lens = AtmosphericLoss.geometricLoss(distance_m, with_lens["divergenceRad"], with_lens["receiverDiamM"], with_lens["beamDiamM"])
 
         lens_tx_loss_dB = -10.0 * math.log10(max(1e-300, with_lens["transmittance"]))
         geometric_gain_dB = geo_base["loss_dB"] - geo_lens["loss_dB"]
@@ -1160,7 +1193,8 @@ class ComprehensiveTransmissionTest:
                 lensed_beam = lens.apply_to_beam({
                     "divergenceRad": beam_div_rad,
                     "beamDiamM": 0.004,
-                    "receiverDiamM": receiver_diam_m
+                    "receiverDiamM": receiver_diam_m,
+                    "wavelengthNm": wavelength_nm,
                 })
                 effective_recv_r = lensed_beam["receiverDiamM"] / 2.0
 
@@ -1174,7 +1208,7 @@ class ComprehensiveTransmissionTest:
                     "wavelengthNm": wavelength_nm,
                     "beamDivRad": lensed_beam["divergenceRad"],
                     "receiverDiamM": lensed_beam["receiverDiamM"],
-                    "beamDiamM": 0.004,
+                    "beamDiamM": lensed_beam["beamDiamM"],
                     "Cn2": trace["avgCn2"] if trace["avgCn2"] > 0 else 1e-15,
                     "receiverSensitivity_dBm": receiver_sensitivity_dBm
                 })

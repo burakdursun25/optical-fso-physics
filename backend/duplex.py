@@ -106,12 +106,17 @@ def link_budget(src: Terminal, dst: Terminal, distance_m: float, weather: str = 
     ch = ArqChannel(p_rx_dBm=p_rx, noise_rms_dBm=dst.noise_rms_dBm, sigma_I2=sigma_I2,
                     interference_dBm=xt)
     clean = ArqChannel(p_rx_dBm=p_rx, noise_rms_dBm=dst.noise_rms_dBm)
+    noise_sensitivity_dBm = dst.noise_rms_dBm + 10.0 * math.log10(12.0)
+    effective_sensitivity_dBm = max(dst.sensitivity_dBm, noise_sensitivity_dBm)
     budget = {
         "wavelength_nm": src.wavelength_nm, "p_tx_dBm": src.tx_power_dBm, "p_rx_dBm": p_rx,
         "optics_loss_dB": optics_loss, "atmos_loss_dB": atmos, "atmos_alpha_dB_km": alpha,
         "fixed_loss_dB": fixed_loss_dB, "extra_loss_dB": extra_loss_dB,
         "crosstalk_dBm": xt, "sir_dB": p_rx - xt, "sigma_I2": sigma_I2,
-        "margin_dB": p_rx - dst.sensitivity_dBm, "viable": p_rx > dst.sensitivity_dBm,
+        "nominal_sensitivity_dBm": dst.sensitivity_dBm,
+        "noise_sensitivity_dBm": noise_sensitivity_dBm,
+        "effective_sensitivity_dBm": effective_sensitivity_dBm,
+        "margin_dB": p_rx - effective_sensitivity_dBm, "viable": p_rx > effective_sensitivity_dBm,
         "ber_no_crosstalk": clean.mean_ber(), "ber_mean_power": ch.mean_ber(),
         "ber_faded_mean": ch.faded_mean_ber(),
         "distance_m": distance_m,

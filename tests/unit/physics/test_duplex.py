@@ -119,3 +119,12 @@ def test_lens_roles_are_validated_and_receive_lens_adds_capture_area():
 def test_invalid_parameters_rejected(kw):
     with pytest.raises(ValueError):
         run_duplex(**kw)
+
+
+def test_duplex_margin_is_negative_when_ber_exceeds_noise_floor():
+    res = link_budget(Terminal("A", tx_power_dBm=-10.0), Terminal("B", sensitivity_dBm=-40.0, noise_rms_dBm=-30.0), 1500.0)
+    b = res["budget"]
+
+    assert b["ber_faded_mean"] > 0.01
+    assert b["viable"] is False
+    assert b["margin_dB"] < 0.0

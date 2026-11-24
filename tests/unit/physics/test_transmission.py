@@ -3,6 +3,8 @@ import math
 import random
 import zlib
 
+import pytest
+
 from backend.engine import (
     AtmosphericLoss,
     DataTransmissionSimulator,
@@ -204,3 +206,30 @@ def test_comprehensive_transmission_covers_every_environment_and_lens():
 
     assert len(results) == len(EnvironmentPresets.get_preset_keys()) * len(LensSystem.LENS_TYPES)
     assert all(0.0 <= item["successRate"] <= 100.0 for item in results)
+
+
+def test_lens_system_enforces_diffraction_limit_etendue_and_custom_aperture():
+    lam = 1550e-9
+    for lens_key in LensSystem.LENS_TYPES:
+        lens = LensSystem(lens_key)
+        beam = lens.apply_to_beam({
+            "divergenceRad": 1e-5,
+            "beamDiamM": 0.004,
+            "receiverDiamM": 0.1,
+            "wavelengthNm": 1550.0,
+        })
+        theta_diff = lam / (math.pi * (beam["beamDiamM"] / 2.0))
+        assert beam["divergenceRad"] >= theta_diff - 1e-15
+        if LensSystem.LENS_TYPES[lens_key]["divergenceReduction"] > 0:
+            assert beam["beamDiamM"] > 0.004
+
+    custom = LensSystem("collimating", custom_aperture_m=0.04)
+    custom_beam = custom.apply_to_beam({"divergenceRad": 1e-3, "beamDiamM": 0.004, "receiverDiamM": 0.1})
+    assert custom_beam["receiverDiamM"] == pytest.approx(0.04)
+
+
+def test_ascii_hello_respects_requested_length():
+    for length in (8, 40, 50):
+        bits = DataTransmissionSimulator.generateTestData("ascii_hello", length)
+        assert len(bits) == length
+        assert all(b in (0, 1) for b in bits)

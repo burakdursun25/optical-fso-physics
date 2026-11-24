@@ -72,9 +72,11 @@ class COMSOLBridge:
         wavelength = params.get("wavelength", 1550e-9)
         laserPower = params.get("laserPower", 0.01)
         beamWaist = params.get("beamWaist", 0.002)
+        beamDivRad = params.get("beamDivRad", 0.001)
         numRays = params.get("numRays", 100)
         baseTemp = params.get("baseTemp", 20.0)
         deltaT = params.get("deltaT", 15.0)
+        dist_km = totalX / 1000.0
 
         now_str = _utc_iso()
 
@@ -108,7 +110,7 @@ public class {self.modelName} {{
         
         Model model = ModelUtil.create("Model");
         model.modelPath("");
-        model.label("FSO_Atmospheric_Channel_6km.mph");
+        model.label("FSO_Atmospheric_Channel_{dist_km:g}km.mph");
 
         // ── Parameters ─────────────────────────────────────
         model.param().set("L_total", "{totalX} [m]", "Total propagation distance");
@@ -204,7 +206,7 @@ public class {self.modelName} {{
                 "rcv_x - src_x", "rcv_y - src_y", "rcv_z - src_z"
             }});
         model.component("comp1").physics("gop").feature("relp1")
-            .set("alphaCone", "0.001 [rad]");
+            .set("alphaCone", "{beamDivRad} [rad]");
 
         // Wall: Absorbing at receiver end
         model.component("comp1").physics("gop").create("wall1", "Wall", 2);
@@ -271,7 +273,7 @@ public class {self.modelName} {{
 
     public static void main(String[] args) {{
         Model model = run();
-        model.save("FSO_Atmospheric_Channel_6km");
+        model.save("FSO_Atmospheric_Channel_{dist_km:g}km");
     }}
 }}
 """
@@ -286,6 +288,9 @@ public class {self.modelName} {{
         totalZ = atm.gridZ * cs
         wavelength = params.get("wavelength", 1550e-9)
         baseTemp = params.get("baseTemp", 20.0)
+        beamDivRad = params.get("beamDivRad", 0.001)
+        dist_km = totalX / 1000.0
+        dist_tag = f"{dist_km:g}km".replace(".", "_")
 
         now_str = _utc_iso()
 
@@ -308,8 +313,8 @@ clear; clc;
 import com.comsol.model.*
 import com.comsol.model.util.*
 
-model = ModelUtil.create('FSO_6km');
-model.label('FSO_Atmospheric_Channel_6km.mph');
+model = ModelUtil.create('FSO_{dist_tag}');
+model.label('FSO_Atmospheric_Channel_{dist_km:g}km.mph');
 
 %% ── Parametreler ─────────────────────────────────────
 model.param.set('L_total', '{totalX} [m]', 'Toplam mesafe');
@@ -365,7 +370,7 @@ relp1.set('x0', {{'{sourcePos.x}', '{sourcePos.y}', '{sourcePos.z}'}});
 relp1.set('N', '100');
 relp1.set('ReleaseType', 'Conical');
 relp1.set('coneAxis', {{'{targetPos.x - sourcePos.x}', '{targetPos.y - sourcePos.y}', '{targetPos.z - sourcePos.z}'}});
-relp1.set('alphaCone', '0.001 [rad]');
+relp1.set('alphaCone', '{beamDivRad} [rad]');
 
 %% ── Mesh ─────────────────────────────────────────────
 mesh1 = comp1.mesh.create('mesh1');
@@ -392,8 +397,8 @@ pg2 = model.result.create('pg2', 'PlotGroup2D');
 pg2.label('Alici_Yogunluk');
 
 %% ── Model Kaydetme ──────────────────────────────────
-mphsave(model, 'FSO_Atmospheric_Channel_6km.mph');
-fprintf('Model kaydedildi: FSO_Atmospheric_Channel_6km.mph\\n');
+mphsave(model, 'FSO_Atmospheric_Channel_{dist_km:g}km.mph');
+fprintf('Model kaydedildi: FSO_Atmospheric_Channel_{dist_km:g}km.mph\\n');
 """
 
     def generateParametersFile(self, atmosphere, sourcePos, targetPos, params=None):
@@ -408,6 +413,8 @@ fprintf('Model kaydedildi: FSO_Atmospheric_Channel_6km.mph\\n');
         wavelength = params.get("wavelength", 1550e-9)
         laserPower = params.get("laserPower", 0.01)
         beamWaist = params.get("beamWaist", 0.002)
+        beamDivRad = params.get("beamDivRad", 0.001)
+        cn2 = params.get("Cn2", float(atm.Cn2.mean()) if len(atm.Cn2) else 1e-15)
         baseTemp = params.get("baseTemp", 20.0)
         deltaT = params.get("deltaT", 15.0)
 
@@ -432,6 +439,6 @@ src_z {sourcePos.z}[m] Source Z position
 rcv_x {targetPos.x}[m] Receiver X position
 rcv_y {targetPos.y}[m] Receiver Y position
 rcv_z {targetPos.z}[m] Receiver Z position
-alpha_div 0.001[rad] Beam divergence angle
-Cn2 1e-14[m^(-2/3)] Refractive index structure parameter
+alpha_div {beamDivRad}[rad] Beam divergence angle
+Cn2 {cn2}[m^(-2/3)] Refractive index structure parameter
 """

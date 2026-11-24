@@ -25,4 +25,4 @@ jobs:
           node-version: 22
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest -q
-      - run: for file in app.js engine.js renderer.js comsol.js; do node --check "$file"; done
+      - run: for file in app.js engine.js renderer.js comsol.js viz3d.js duplex.js lens-designer.js; do node --check "$file"; done
